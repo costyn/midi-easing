@@ -33,7 +33,7 @@ def easing_thread():
                 # Easing duration completed
                 smoothed_value = state['target_value']
                 state['running'] = False  # Stop easing
-                print(f"Easing completed. Final value: {smoothed_value} at time: {current_time}")
+                print(f"Easing completed. Final value: {smoothed_value}")
             else:
                 t = elapsed_time / easing_duration
                 smoothed_value = apply_easing(state['start_value'], state['target_value'], t)
@@ -55,7 +55,7 @@ def process_message(message):
             # Update target value and reset timing
             state['target_value'] = target_value
             # state['start_time'] = current_time
-            print(f"Updated target value: {target_value} at time: {current_time}")
+            # print(f"Updated target value: {target_value} at time: {current_time}")
         else:
             # Start a new easing
             state['start_time'] = current_time
