@@ -84,13 +84,22 @@ def main():
             # Start the easing thread
             threading.Thread(target=easing_thread, daemon=True).start()
 
-            while True:
-                for msg in inport:
-                    processed_msg = process_message(msg)
-                    if processed_msg:
-                        # Directly send the processed message if it's necessary
-                        outport.send(processed_msg)
-                        print(f"Sent: {processed_msg}")
+            try:
+                while True:
+                    for msg in inport:
+                        processed_msg = process_message(msg)
+                        if processed_msg:
+                            # Directly send the processed message if it's necessary
+                            outport.send(processed_msg)
+                            print(f"Sent: {processed_msg}")
 
+            except KeyboardInterrupt:
+                print("Interrupted by user. Exiting...")
+                
+            finally:
+                print("Cleaning up...")
+                # Clean up resources if needed
+                state['outport'].close()
+                
 if __name__ == '__main__':
     main()
