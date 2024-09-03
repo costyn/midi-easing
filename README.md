@@ -37,10 +37,12 @@ pip3 install -r requirements.txt
 2.	Run the script:
 
 ```shell
-python3 midi_easing_controller.py
+python3 midi-easing.py
 ```
 
 The script will start listening for MIDI input, apply smoothing to the control change messages, and send the processed messages.
+
+Press `ctrl-c` to quit.
 
 ## Configuration
 
@@ -48,9 +50,14 @@ You can adjust parameters in the script such as:
 
 * Easing duration: The time over which the value should be smoothed.
 * MIDI input and output ports: Change these in the script to match your setup.
-** Run the `portid.py` script to see available ports.
+  * Run the `portid.py` script to see available ports.
 
 ## Troubleshooting
 
 * No MIDI devices detected: Make sure your MIDI devices are connected and properly configured in your system.
 * Errors with mido: Ensure you have the correct version of the mido library installed. You can adjust the version in the requirements.txt if needed.
+
+## Roadmap
+* Commandline options to pass midi in/out
+* If no options, then a choose menu
+* Console "GUI" ?
