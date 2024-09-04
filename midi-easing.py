@@ -2,12 +2,10 @@ import mido
 from easing_functions import SineEaseInOut
 import time
 import threading
+import configparser
 
 # Create an easing function instance
 easing_function = SineEaseInOut()
-
-# Define smoothing parameters
-easing_duration = 2000  # Duration in milliseconds
 
 # Shared state for easing
 state = {
@@ -43,8 +41,13 @@ def easing_thread():
                     data['last_sent_value'] = smoothed_value
                     print(f"Sent (during easing) for control {control}: {midi_message}")
 
-def process_message(message):
+def process_message(message, whitelist_controls):
+    global state
     if message.type == 'control_change':
+        if message.control in whitelist_controls:
+            print(f"Control {message.control} is whitelisted; passthrough.")
+            return message
+
         current_time = time.time() * 1000  # Current time in milliseconds
         control = message.control
         target_value = message.value
@@ -68,36 +71,66 @@ def process_message(message):
         return message
 
 def main():
-    input_port_name = 'MIDI Mix'
-    output_port_name = 'IAC Driver Virtual Midi Port'
+    config = load_config()
 
-    print("Opening ports...")
-    with mido.open_input(input_port_name) as inport:
-        with mido.open_output(output_port_name) as outport:
-            print("Listening for MIDI input...")
+    input_port_name = config['input_port_name']
+    output_port_name = config['output_port_name']
+    global easing_duration
+    easing_duration = config['easing_duration']  # Update easing duration from config
 
-            # Initialize state with outport
-            state['outport'] = outport
+    try:
+        print("Trying to open ports...")
+        with mido.open_input(input_port_name) as inport:
+            with mido.open_output(output_port_name) as outport:
+                print(f"Connected to '{input_port_name}' and '{output_port_name}'. Listening for MIDI input...")
 
-            # Start the easing thread
-            threading.Thread(target=easing_thread, daemon=True).start()
+                # Initialize state with outport
+                state['outport'] = outport
 
-            try:
-                while True:
-                    for msg in inport:
-                        processed_msg = process_message(msg)
-                        if processed_msg:
-                            # Directly send the processed message if it's necessary
-                            outport.send(processed_msg)
-                            print(f"Sent: {processed_msg}")
+                # Start the easing thread
+                threading.Thread(target=easing_thread, daemon=True).start()
 
-            except KeyboardInterrupt:
-                print("Interrupted by user. Exiting...")
-                
-            finally:
-                print("Cleaning up...")
-                # Clean up resources if needed
-                state['outport'].close()
+                try:
+                    while True:
+                        for msg in inport:
+                            processed_msg = process_message(msg, config['whitelist_controls'])
+                            if processed_msg:
+                                # Directly send the processed message if it's necessary
+                                outport.send(processed_msg)
+                                print(f"Sent: {processed_msg}")
+
+                except KeyboardInterrupt:
+                    print("Interrupted by user. Exiting...")
+                    
+                finally:
+                    print("Cleaning up...")
+                    # Clean up resources if needed
+                    state['outport'].close()
+
+    except IOError as e:
+        print(f"Error opening a MIDI port in configured in config.ini: {e}. Available ports:")
+        print("\nInput ports:")
+        for port in mido.get_input_names():
+            print(f"\t{port}")
+        print("\nOutput Ports:")
+        for port in mido.get_output_names():
+            print(f"\t{port}")
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+
+def load_config(config_file='config.ini'):
+    config = configparser.ConfigParser()
+    config.read(config_file)
+
+    midi_config = config['MIDI']
+    settings_config = config['Settings']
+
+    return {
+        'input_port_name': midi_config.get('input_port_name', 'MIDI Mix'),
+        'output_port_name': midi_config.get('output_port_name', 'IAC Driver Virtual Midi Port'),
+        'whitelist_controls': list(map(int, settings_config.get('whitelist_controls', '').split(','))),
+        'easing_duration': settings_config.getint('easing_duration', 2000)
+    }
 
 if __name__ == '__main__':
     main()
