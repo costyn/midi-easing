@@ -124,12 +124,22 @@ def load_config(config_file='config.ini'):
 
     midi_config = config['MIDI']
     settings_config = config['Settings']
+    defaults_config = config['DEFAULTS']
+    easing_durations = config['Easing_durations']
 
+    custom_easing_durations = {}
+    for control_channel, duration in easing_durations.items():
+        try:
+            custom_easing_durations[int(control_channel)] = int(duration)
+        except ValueError:
+            print(f"Warning: Invalid duration '{duration}' for control channel '{control_channel}'")
+ 
     return {
         'input_port_name': midi_config.get('input_port_name', 'MIDI Mix'),
         'output_port_name': midi_config.get('output_port_name', 'IAC Driver Virtual Midi Port'),
         'whitelist_controls': list(map(int, settings_config.get('whitelist_controls', '').split(','))),
-        'easing_duration': settings_config.getint('easing_duration', 2000)
+        'default_easing_duration': defaults_config.getint('easing_duration', 2000),
+        'custom_easing_durations': custom_easing_durations
     }
 
 if __name__ == '__main__':

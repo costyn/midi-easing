@@ -65,6 +65,7 @@ You can adjust parameters in the script such as:
 ## Roadmap
 
 - Config file
+  - Specify easing type and duration per control channel?
   - Specify a "note" message to globally enable/disable/toggle easing?
   - Specify a "note" message to switch between different easings
   - Specify a "note" message to globally enable/disable/toggle easing
