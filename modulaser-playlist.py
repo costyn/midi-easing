@@ -16,20 +16,20 @@ notes_channel0.remove(26)
 notes_channel0.remove(27)
 
 def clear_layers():
-    port.send(Message('note_on', note=25, velocity=127))
-    time.sleep(0.2)
+    # port.send(Message('note_on', note=25, velocity=127))
+    # time.sleep(0.2)
     port.send(Message('note_off', note=25, velocity=127))  # C#1
-    time.sleep(0.2)
+    time.sleep(0.1)
 
-    port.send(Message('note_on', note=26, velocity=127))  # D-1
-    time.sleep(0.2)
+    # port.send(Message('note_on', note=26, velocity=127))  # D-1
+    # time.sleep(0.2)
     port.send(Message('note_off', note=26, velocity=127))  # D-1
-    time.sleep(0.2)
+    time.sleep(0.1)
 
-    port.send(Message('note_on', note=27, velocity=127))  # D#1
-    time.sleep(0.2)
+    # port.send(Message('note_on', note=27, velocity=127))  # D#1
+    # time.sleep(0.2)
     port.send(Message('note_off', note=27, velocity=127))  # D#1
-    time.sleep(0.2)
+    time.sleep(0.1)
 
 
 # Function to send notes
@@ -37,7 +37,7 @@ def send_note(note, channel):
     clear_layers()
     print(f"Sending {note} on channel {channel}")
     port.send(Message('note_on', note=note, velocity=127, channel=channel))
-    time.sleep(0.8)
+    time.sleep(0.2)
     port.send(Message('note_off', note=note, velocity=127, channel=channel))
 
 # Function to handle space bar press
