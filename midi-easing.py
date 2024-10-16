@@ -41,9 +41,40 @@ def easing_thread():
                     data['last_sent_value'] = smoothed_value
                     print(f"Sent (during easing) for control {control}: {midi_message}")
 
+def map_value(value, input_min, input_max, output_min, output_max):
+    """
+    Map a value from one range to another.
+    
+    :param value: The input value to be mapped.
+    :param input_min: The minimum of the input range.
+    :param input_max: The maximum of the input range.
+    :param output_min: The minimum of the output range.
+    :param output_max: The maximum of the output range.
+    :return: The mapped output value.
+    """
+    # Ensure the input value is within the specified range
+    if value < input_min:
+        return output_min
+    if value > input_max:
+        return output_max
+
+    # Perform the mapping
+    return (value - input_min) / (input_max - input_min) * (output_max - output_min) + output_min
+
 def process_message(message, whitelist_controls):
     global state
     if message.type == 'control_change':
+        if message.control == 62:
+            inverted_value = 127 - message.value  # Assuming MIDI values range from 0 to 127
+            print(f"Inverting value for control {message.control}: {message.value} -> {inverted_value}")
+            return mido.Message('control_change', control=message.control, value=inverted_value)
+        
+         # Map input value for control channel 61
+        if message.control == 61:
+            mapped_value = round(map_value(message.value, 0, 127, 0, 31))
+            print(f"Mapping value for control {message.control}: {message.value} -> {mapped_value}")
+            return mido.Message('control_change', control=message.control, value=int(mapped_value))
+
         if message.control in whitelist_controls:
             print(f"Control {message.control} is whitelisted; passthrough.")
             return message
