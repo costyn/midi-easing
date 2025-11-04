@@ -106,8 +106,9 @@ def main():
 
     input_port_name = config['input_port_name']
     output_port_name = config['output_port_name']
+
     global easing_duration
-    easing_duration = config['easing_duration']  # Update easing duration from config
+    easing_duration = config['default_easing_duration']
 
     try:
         print("Trying to open ports...")

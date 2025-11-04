@@ -1,1 +1,12 @@
-venv
+# Python virtual environment
+venv/
+
+# Build artifacts
+*.o
+midi-easing-proxy
+
+# Third-party libraries
+vendor/
+
+# macOS
+.DS_Store
