@@ -1,0 +1,1 @@
+This is the attic. Unused but still useful pieces of code live here.

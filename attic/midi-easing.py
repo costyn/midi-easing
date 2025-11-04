@@ -41,9 +41,40 @@ def easing_thread():
                     data['last_sent_value'] = smoothed_value
                     print(f"Sent (during easing) for control {control}: {midi_message}")
 
+def map_value(value, input_min, input_max, output_min, output_max):
+    """
+    Map a value from one range to another.
+    
+    :param value: The input value to be mapped.
+    :param input_min: The minimum of the input range.
+    :param input_max: The maximum of the input range.
+    :param output_min: The minimum of the output range.
+    :param output_max: The maximum of the output range.
+    :return: The mapped output value.
+    """
+    # Ensure the input value is within the specified range
+    if value < input_min:
+        return output_min
+    if value > input_max:
+        return output_max
+
+    # Perform the mapping
+    return (value - input_min) / (input_max - input_min) * (output_max - output_min) + output_min
+
 def process_message(message, whitelist_controls):
     global state
     if message.type == 'control_change':
+        if message.control == 62:
+            inverted_value = 127 - message.value  # Assuming MIDI values range from 0 to 127
+            print(f"Inverting value for control {message.control}: {message.value} -> {inverted_value}")
+            return mido.Message('control_change', control=message.control, value=inverted_value)
+        
+         # Map input value for control channel 61
+        if message.control == 61:
+            mapped_value = round(map_value(message.value, 0, 127, 0, 31))
+            print(f"Mapping value for control {message.control}: {message.value} -> {mapped_value}")
+            return mido.Message('control_change', control=message.control, value=int(mapped_value))
+
         if message.control in whitelist_controls:
             print(f"Control {message.control} is whitelisted; passthrough.")
             return message
@@ -75,8 +106,9 @@ def main():
 
     input_port_name = config['input_port_name']
     output_port_name = config['output_port_name']
+
     global easing_duration
-    easing_duration = config['easing_duration']  # Update easing duration from config
+    easing_duration = config['default_easing_duration']
 
     try:
         print("Trying to open ports...")
@@ -124,12 +156,22 @@ def load_config(config_file='config.ini'):
 
     midi_config = config['MIDI']
     settings_config = config['Settings']
+    defaults_config = config['DEFAULTS']
+    easing_durations = config['Easing_durations']
 
+    custom_easing_durations = {}
+    for control_channel, duration in easing_durations.items():
+        try:
+            custom_easing_durations[int(control_channel)] = int(duration)
+        except ValueError:
+            print(f"Warning: Invalid duration '{duration}' for control channel '{control_channel}'")
+ 
     return {
         'input_port_name': midi_config.get('input_port_name', 'MIDI Mix'),
         'output_port_name': midi_config.get('output_port_name', 'IAC Driver Virtual Midi Port'),
         'whitelist_controls': list(map(int, settings_config.get('whitelist_controls', '').split(','))),
-        'easing_duration': settings_config.getint('easing_duration', 2000)
+        'default_easing_duration': defaults_config.getint('easing_duration', 2000),
+        'custom_easing_durations': custom_easing_durations
     }
 
 if __name__ == '__main__':

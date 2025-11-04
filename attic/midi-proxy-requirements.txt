@@ -1,0 +1,56 @@
+In this requirements session we are going to be modifying a MIDI proxy that sits 
+between laser software Modulaser and an Akai MidiMix controller.
+
+The midi-easing.py listens to incoming messages and applies easing to incoming parameters
+so the movement is less jerky. See README too.
+
+The problem I'm having is that, in the laser control software Modulaser, the midi knobs 
+map to parameter controls. And whenever you switch to a new preset, the knob positions 
+no longer correspond to the values in the presets, so whenever you then start adjusting 
+a parameter, the animation jumps as it immediately uses the new midi input value. 
+
+In this refactor, these things should be implemented:
+1. Midi messages are no longer sent to IAC Bus (see config.ini)
+2. The script should instead create a new virtual port, Midi Easing:
+
+```python
+import rtmidi
+
+# Create virtual output (appears as input to other apps)
+midiout = rtmidi.MidiOut()
+midiout.open_virtual_port("Midi Easing")
+
+# Create virtual input (appears as output to other apps)
+midiin = rtmidi.MidiIn()
+midiin.open_virtual_port("Midi Easing")
+
+# Process/route between them as needed
+```
+I dont know if mido supports this, otherwise we will need to refactor to use the rtmidi library,
+or use a different language/framework altogether (Swift? Objective C?) Please advise.
+
+3. Modulaser will send/receive midi messages through the Midi Easing virtual midi port. 
+
+I (with help from Claude) made a start to this new rtimidi way of doing things in rtimidi-listen.py, and this works as desired.
+
+Note that MidiMix control messages are also sent back to the virtual midi port by modulaser during param changes:
+Received MIDI Mix message: ([176, 19, 65], 0.016448208000000002) at time: None
+Received MIDI Mix message: ([176, 19, 63], 0.01646275) at time: None
+Received Modulaser message: ([176, 19, 60], 0.065058) at time: None
+Received MIDI Mix message: ([176, 19, 61], 0.016379208000000003) at time: None
+Received MIDI Mix message: ([176, 19, 59], 0.016538375) at time: None
+Received MIDI Mix message: ([176, 19, 57], 0.016463333) at time: None
+Received MIDI Mix message: ([176, 19, 56], 0.016390958) at time: None
+Received Modulaser message: ([176, 19, 53], 0.06911400000000001) at time: None
+
+4. The script/program should track incoming midi messages and update internal state
+5. If a new midi control message comes from the MidiMix controller, it should be compared to
+  the value in the stored state, and easing applied to move towards the new value from the controller.
+6. In this way, hopefully moving a control on the MidiMix will not make the animation instantly jerk to the new parameter value.
+
+7. The midi-easing.py script was created by an earlier version of Claude Code and there's parts that are not great, code quality wise.
+8. Please respect the config in the config.ini, where certain channels aren't eased.
+
+Again: I'm not particularly tied to Python; I wanted to have something quick & dirty to try this feeature out.
+Personally I'm familiar with C, C++, Kotlin, Java, and TypeScript. 
+

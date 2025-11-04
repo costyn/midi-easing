@@ -4,7 +4,7 @@ import time
 import random
 
 # Open the MIDI port for sending messages
-port_name = 'IAC Driver Virtual Midi Port'
+port_name = 'IAC Driver Bus 1'
 port = mido.open_output(port_name)
 
 notes_channel0 = list(range(0, 126))
