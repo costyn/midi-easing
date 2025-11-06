@@ -53,7 +53,7 @@ struct ControlState {
     bool is_easing = false;
     uint8_t last_sent_value = 0;
     bool modulaser_value_known = false;
-    bool is_latched = true;  // Start latched, will unlatch when Modulaser sends different value
+    bool is_latched = false;            // Start latched, will unlatch when Modulaser sends different value
     uint8_t last_controller_value = 0;  // Track controller position for crossover detection
 };
 
@@ -321,7 +321,7 @@ void midimixCallback(double deltatime, std::vector<unsigned char> *message, void
     if (!state.modulaser_value_known) {
         sendMidiCC(control, value);
         state.last_sent_value = value;
-        state.is_latched = true;
+        state.is_latched = false;
         return;
     }
 
