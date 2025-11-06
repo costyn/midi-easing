@@ -10,7 +10,9 @@ This is a high-performance C++ rewrite of the original Python implementation, de
 
 - **Virtual MIDI Port**: Creates "Midi Easing" virtual port that appears as both input and output
 - **Automatic Device Detection**: Polls for MidiMix controller and connects automatically
+- **LED Control**: Visual feedback using MIDIMix button LEDs with startup light show
 - **Smart Easing**: Only applies easing when value differences exceed threshold (default: 3)
+- **Latch/Pickup Mode**: Prevents controller jumps - physical controls must "pick up" current software values before taking effect
 - **Bidirectional Communication**: Tracks echo messages from Modulaser to maintain accurate state
 - **Control Whitelist**: Bypass easing for specific controls that need immediate response
 - **Custom Transformations**: Built-in value mapping for specific controls (CC61, CC62)
@@ -66,8 +68,9 @@ This copies the binary to `/usr/local/bin/midi-easing-proxy`
 The proxy will:
 1. Create a virtual MIDI port named "Midi Easing"
 2. Poll for the MidiMix controller every second
-3. Start the easing engine at 100Hz
-4. Display all MIDI messages (verbose mode)
+3. When connected, run a LED light show on the MidiMix
+4. Start the easing engine at 100Hz
+5. Display all MIDI messages (verbose mode)
 
 ### Quiet Mode
 
@@ -163,6 +166,76 @@ The proxy includes special handling for two controls that need instant response 
 
 **Important:** These controls bypass ALL easing logic and are processed immediately before any mutex locking. Modulaser echo messages for these controls are also ignored to prevent callback thread flooding and maintain buttery-smooth responsiveness.
 
+## LED Control
+
+The proxy includes intelligent LED feedback using the MIDIMix button LEDs:
+
+### Startup Light Show
+When the MidiMix connects, the proxy runs a light show sequence:
+1. Chase pattern through all LEDs (MUTE row → REC ARM row → BANK buttons)
+2. All LEDs flash on together briefly
+3. Transition to steady state with permanent LEDs on (notes 24, 25, 26)
+
+### Dynamic LED Control
+The proxy responds to MIDI Note On messages from Modulaser to control LEDs:
+- **Note velocity > 100**: LED turns ON (indicates active preset)
+- **Note velocity ≤ 100**: LED turns OFF (indicates available preset)
+
+This provides visual feedback on the physical controller matching the software state.
+
+### LED Notes Mapping
+- **MUTE buttons**: Notes 1, 4, 7, 10, 13, 16, 19, 22
+- **REC ARM buttons**: Notes 3, 6, 9, 12, 15, 18, 21, 24
+- **BANK LEFT**: Note 25
+- **BANK RIGHT**: Note 26
+
+Permanent LEDs (24, 25, 26) remain lit during normal operation to indicate active connection.
+
+### Testing LEDs
+A standalone utility is included to test LED functionality:
+```bash
+make test-leds
+./test-leds
+```
+
+This interactive tool allows you to:
+- Test all known LED buttons
+- Scan all possible note numbers (1-127)
+- Run a demonstration light show
+- Test individual note numbers
+
+## Latch/Pickup Mode
+
+The proxy includes intelligent pickup detection to prevent jarring jumps when physical controls don't match software values (e.g., after a preset change):
+
+### How It Works
+1. **Initial State**: When Modulaser reports a control value (via echo), the proxy tracks both:
+   - Last known software value (from Modulaser echo)
+   - Last known hardware value (from MidiMix)
+
+2. **Pickup Detection**: If hardware and software values diverge (common after preset changes):
+   - The control enters "latched" state
+   - Physical movements are **not** sent to Modulaser yet
+   - Proxy waits for the hardware value to "pick up" the software value
+
+3. **Pickup Threshold**: When the hardware value comes within the configured threshold of the software value:
+   - Control becomes "unlatched"
+   - Normal easing behavior resumes
+   - Physical movements are sent smoothly to Modulaser
+
+### Benefits
+- **No Jumps**: Prevents sudden parameter changes when touching controls after preset changes
+- **Natural Feel**: Physical control must sweep through the current software value to take effect
+- **Automatic**: No special mode switching or button presses required
+- **Per-Control**: Each control independently tracks its own pickup state
+
+### Configuration
+The pickup threshold uses the same `easing_threshold` setting in config.ini:
+```ini
+[Settings]
+easing_threshold = 3   # Also used for pickup detection
+```
+
 ## How It Works
 
 ### Architecture
@@ -179,11 +252,15 @@ MidiMix Controller → [Transformations] → [Threshold Check] → [Easing Engin
 2. **Apply transformations** (if control is 61 or 62)
 3. **Check whitelist**: If whitelisted → send immediately and done
 4. **Check if Modulaser state known**: If first message → send immediately
-5. **Calculate difference**: `diff = |new_value - last_modulaser_value|`
-6. **Threshold check**:
+5. **Latch/Pickup Check**: If hardware value doesn't match software value:
+   - Enter latched state (suppress sending)
+   - Wait for hardware to "pick up" software value
+   - Once within threshold → unlatch and resume normal operation
+6. **Calculate difference**: `diff = |new_value - last_modulaser_value|`
+7. **Threshold check**:
    - If `diff < easing_threshold` → send immediately
    - If `diff >= easing_threshold` → start easing
-7. **Easing thread** (runs at 100Hz):
+8. **Easing thread** (runs at 100Hz):
    - Calculate elapsed time: `t = elapsed / duration`
    - Apply easing function: `eased_t = SineEaseInOut(t)`
    - Interpolate: `value = start + eased_t * (target - start)`
@@ -193,11 +270,12 @@ MidiMix Controller → [Transformations] → [Threshold Check] → [Easing Engin
 ### State Management
 
 For each control (0-127), the proxy tracks:
-- Last value from MidiMix
-- Last value from Modulaser (echo)
+- Last value from MidiMix (hardware position)
+- Last value from Modulaser (software state via echo)
 - Current easing target
 - Easing start time and duration
 - Whether easing is active
+- Latch state (whether control needs to pick up software value)
 
 This state is thread-safe (protected by mutex) and allows:
 - Smooth transitions when presets change
@@ -219,7 +297,14 @@ This state is thread-safe (protected by mutex) and allows:
 ### Easing not working
 - Verify Modulaser is echoing MIDI messages back to the proxy
 - Check that value differences exceed `easing_threshold` (default 3)
+- Control may be in latched state - move it to pick up the current software value
 - Enable verbose logging (remove `-q` flag) to see messages
+
+### LEDs not working
+- Verify MidiMix is properly connected and detected
+- Check that the proxy opened the MidiMix output port (shown in verbose logs)
+- Try the `test-leds` utility to verify hardware LED functionality
+- Ensure Modulaser is sending Note On messages for preset feedback
 
 ### Performance issues
 - Lower `update_rate_hz` in config.ini (e.g., 50 instead of 100)
@@ -261,7 +346,10 @@ The original Python implementation ([midi-easing.py](midi-easing.py)) is still a
 ```
 .
 ├── midi-easing-proxy.cpp    # Main C++ implementation
-├── Makefile                 # Build system
+├── led_controller.cpp       # LED control implementation
+├── led_controller.h         # LED controller header
+├── test-leds.cpp            # LED testing utility
+├── Makefile                 # Build system (includes test-leds target)
 ├── config.ini               # Configuration file
 ├── setup_deps.sh            # Dependency download script
 ├── README.md                # This file
