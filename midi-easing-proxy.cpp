@@ -23,6 +23,7 @@
 #include <csignal>
 #include "vendor/rtmidi-6.0.0/RtMidi.h"
 #include "vendor/AHEasing/easing.h"
+#include "led_controller.h"
 
 // ============================================================================
 // Configuration Structure
@@ -69,6 +70,8 @@ std::atomic<bool> midimix_connected(false);
 RtMidiIn *fromModulaser = nullptr;
 RtMidiOut *toModulaser = nullptr;
 RtMidiIn *fromMidiMix = nullptr;
+RtMidiOut *toMidiMix = nullptr;  // For LED control
+LEDController *ledController = nullptr;
 
 // ============================================================================
 // Utility Functions
@@ -137,14 +140,26 @@ void modulaserCallback(double deltatime, std::vector<unsigned char> *message, vo
     uint8_t data1 = (*message)[1];
     uint8_t data2 = (*message)[2];
 
-    // Handle Note On/Off messages - pass through to MidiMix
+    // Handle Note On/Off messages - use for LED control
     if ((status & 0xF0) == 0x80 || (status & 0xF0) == 0x90) {
         if (!config.quiet) {
             std::string msg_type = ((status & 0xF0) == 0x90) ? "Note On" : "Note Off";
             std::cout << "[Modulaser] " << msg_type << " note " << (int)data1
                       << " velocity " << (int)data2 << std::endl;
         }
-        // Note: We don't send these back to MidiMix since it doesn't need feedback
+
+        // Use Modulaser's Note On messages to control MidiMix LEDs
+        // Velocity > 100 = LED on (active preset), velocity <= 100 = LED off (available preset)
+        if (((status & 0xF0) == 0x90) && ledController) {
+            bool shouldBeOn = data2 > 100;
+            ledController->setNoteLED(data1, shouldBeOn);
+
+            if (!config.quiet) {
+                std::cout << "[LED] Note " << (int)data1 << " -> "
+                          << (shouldBeOn ? "ON (active)" : "OFF (available)") << std::endl;
+            }
+        }
+
         return;
     }
 
@@ -219,7 +234,9 @@ void midimixCallback(double deltatime, std::vector<unsigned char> *message, void
             std::cout << "[MidiMix] " << msg_type << " note " << (int)data1
                       << " velocity " << (int)data2 << std::endl;
         }
+
         // Pass through immediately without easing
+        // LED control will be handled by Modulaser's response
         if (toModulaser) {
             toModulaser->sendMessage(message);
         }
@@ -434,6 +451,7 @@ void pollForMidiMix() {
     while (running && !midimix_connected) {
         try {
             RtMidiIn *midiin = new RtMidiIn();
+            RtMidiOut *midiout = new RtMidiOut();
             unsigned int nPorts = midiin->getPortCount();
 
             for (unsigned int i = 0; i < nPorts; i++) {
@@ -442,10 +460,21 @@ void pollForMidiMix() {
                     std::cout << "[INFO] Found " << config.input_port_name
                               << " on port " << i << std::endl;
 
+                    // Setup MIDI input from MidiMix
                     fromMidiMix = midiin;
                     fromMidiMix->openPort(i);
                     fromMidiMix->setCallback(&midimixCallback, nullptr);
                     fromMidiMix->ignoreTypes(false, false, false);
+
+                    // Setup MIDI output to MidiMix for LED control
+                    toMidiMix = midiout;
+                    toMidiMix->openPort(i);
+
+                    // Initialize LED controller
+                    if (ledController) {
+                        ledController->setMidiOut(toMidiMix);
+                        ledController->runLightShow();
+                    }
 
                     midimix_connected = true;
                     std::cout << "[INFO] Connected to " << config.input_port_name << std::endl;
@@ -454,6 +483,7 @@ void pollForMidiMix() {
             }
 
             delete midiin;
+            delete midiout;
         } catch (RtMidiError &error) {
             std::cerr << "[ERROR] MidiMix polling error: " << error.getMessage() << std::endl;
         }
@@ -566,6 +596,12 @@ void printConfig() {
 
 void signalHandler(int signum) {
     std::cout << "\n[INFO] Shutting down..." << std::endl;
+
+    // Turn off all LEDs before shutdown
+    if (ledController) {
+        ledController->allOff();
+    }
+
     running = false;
 }
 
@@ -593,6 +629,9 @@ int main(int argc, char *argv[]) {
     signal(SIGINT, signalHandler);
 
     try {
+        // Create LED controller
+        ledController = new LEDController();
+
         // Create virtual MIDI ports
         std::cout << "[INFO] Creating virtual MIDI port: " << config.virtual_port_name << std::endl;
 
@@ -627,6 +666,10 @@ int main(int argc, char *argv[]) {
     }
 
     // Cleanup
+    if (ledController) {
+        ledController->allOff();
+        delete ledController;
+    }
     if (fromModulaser) {
         fromModulaser->closePort();
         delete fromModulaser;
@@ -638,6 +681,10 @@ int main(int argc, char *argv[]) {
     if (fromMidiMix) {
         fromMidiMix->closePort();
         delete fromMidiMix;
+    }
+    if (toMidiMix) {
+        toMidiMix->closePort();
+        delete toMidiMix;
     }
 
     std::cout << "[INFO] Shutdown complete" << std::endl;

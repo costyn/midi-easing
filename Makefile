@@ -8,8 +8,9 @@ TARGET = midi-easing-proxy
 TEST_LED = test-leds
 RTMIDI_SRC = vendor/rtmidi-6.0.0/RtMidi.cpp
 EASING_SRC = vendor/AHEasing/easing.c
-SOURCES = midi-easing-proxy.cpp $(RTMIDI_SRC) $(EASING_SRC)
-OBJECTS = midi-easing-proxy.o vendor/rtmidi-6.0.0/RtMidi.o vendor/AHEasing/easing.o
+LED_SRC = led_controller.cpp
+SOURCES = midi-easing-proxy.cpp $(LED_SRC) $(RTMIDI_SRC) $(EASING_SRC)
+OBJECTS = midi-easing-proxy.o led_controller.o vendor/rtmidi-6.0.0/RtMidi.o vendor/AHEasing/easing.o
 TEST_LED_OBJECTS = test-leds.o vendor/rtmidi-6.0.0/RtMidi.o
 
 # Define __MACOSX_CORE__ for CoreMIDI support
