@@ -162,7 +162,15 @@ void modulaserCallback(double deltatime, std::vector<unsigned char> *message, vo
 
     std::lock_guard<std::mutex> lock(state_mutex);
 
+    // Retrieve current control state
     ControlState& state = control_states[control];
+
+    if (state.is_easing) {
+      state.last_modulaser_value = value;
+      state.modulaser_value_known = true;
+      // Don't log to reduce noise during easing
+      return;
+    }
 
     // Check if this new Modulaser value is far from the last controller value
     // If so, unlatch to prevent jumps when controller next moves
