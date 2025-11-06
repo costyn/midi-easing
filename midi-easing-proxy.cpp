@@ -52,6 +52,8 @@ struct ControlState {
     bool is_easing = false;
     uint8_t last_sent_value = 0;
     bool modulaser_value_known = false;
+    bool is_latched = true;  // Start latched, will unlatch when Modulaser sends different value
+    uint8_t last_controller_value = 0;  // Track controller position for crossover detection
 };
 
 // ============================================================================
@@ -161,6 +163,34 @@ void modulaserCallback(double deltatime, std::vector<unsigned char> *message, vo
     std::lock_guard<std::mutex> lock(state_mutex);
 
     ControlState& state = control_states[control];
+
+    // Check if this new Modulaser value is far from the last controller value
+    // If so, unlatch to prevent jumps when controller next moves
+    if (state.modulaser_value_known && state.last_controller_value != 0) {
+        int diff = std::abs((int)value - (int)state.last_controller_value);
+        if (diff >= config.easing_threshold) {
+            // Modulaser value has changed significantly, unlatch
+            if (state.is_latched) {
+                state.is_latched = false;
+                if (!config.quiet) {
+                    std::cout << "[UNLATCH] CC" << (int)control
+                              << " - Modulaser value " << (int)value
+                              << " differs from controller " << (int)state.last_controller_value
+                              << " by " << diff << std::endl;
+                }
+            }
+        } else {
+            // Values are close, ensure we're latched
+            if (!state.is_latched) {
+                state.is_latched = true;
+                if (!config.quiet) {
+                    std::cout << "[LATCH] CC" << (int)control
+                              << " - Modulaser and controller values are close" << std::endl;
+                }
+            }
+        }
+    }
+
     state.last_modulaser_value = value;
     state.modulaser_value_known = true;
 
@@ -236,7 +266,9 @@ void midimixCallback(double deltatime, std::vector<unsigned char> *message, void
     }
 
     ControlState& state = control_states[control];
+    uint8_t previous_controller_value = state.last_controller_value;
     state.last_midimix_value = value;
+    state.last_controller_value = value;  // Always track controller position
 
     // Get easing duration for this control
     if (config.easing_durations.count(control)) {
@@ -245,7 +277,7 @@ void midimixCallback(double deltatime, std::vector<unsigned char> *message, void
         state.easing_duration = config.default_easing_duration;
     }
 
-    // Check whitelist - bypass easing
+    // Check whitelist - bypass easing and latch logic
     if (config.whitelist_controls.count(control)) {
         // Only send if value actually changed
         if (value != state.last_sent_value) {
@@ -260,12 +292,61 @@ void midimixCallback(double deltatime, std::vector<unsigned char> *message, void
         return;
     }
 
-    // If we don't know Modulaser's value yet, just send immediately
+    // If we don't know Modulaser's value yet, send immediately and latch
     if (!state.modulaser_value_known) {
         sendMidiCC(control, value);
         state.last_sent_value = value;
+        state.is_latched = true;
         return;
     }
+
+    // ============================================================================
+    // LATCH/PICKUP MODE LOGIC
+    // ============================================================================
+    // When not latched, don't send values until controller crosses Modulaser value
+    // This prevents jumps when controller and GUI are out of sync
+    // ============================================================================
+
+    if (!state.is_latched) {
+        // Not latched - check if controller has crossed the Modulaser value
+        uint8_t modulaser_val = state.last_modulaser_value;
+
+        // Check if we've crossed over the Modulaser value
+        // This means: previous value was on one side, current value is on the other side (or equal)
+        bool crossed = false;
+
+        if (previous_controller_value < modulaser_val && value >= modulaser_val) {
+            // Crossed from below
+            crossed = true;
+        } else if (previous_controller_value > modulaser_val && value <= modulaser_val) {
+            // Crossed from above
+            crossed = true;
+        }
+
+        if (crossed) {
+            // Controller has crossed Modulaser value - LATCH and start sending
+            state.is_latched = true;
+            if (!config.quiet) {
+                std::cout << "[LATCH] CC" << (int)control
+                          << " - Controller crossed Modulaser value " << (int)modulaser_val
+                          << " (was " << (int)previous_controller_value
+                          << ", now " << (int)value << ")" << std::endl;
+            }
+            // Fall through to normal sending logic below
+        } else {
+            // Haven't crossed yet - don't send anything
+            if (!config.quiet) {
+                std::cout << "[WAITING] CC" << (int)control
+                          << " - Waiting for crossover (Modulaser: " << (int)modulaser_val
+                          << ", Controller: " << (int)value << ")" << std::endl;
+            }
+            return;  // Don't send anything
+        }
+    }
+
+    // ============================================================================
+    // NORMAL EASING LOGIC (when latched)
+    // ============================================================================
 
     // Check if already easing
     if (state.is_easing) {
