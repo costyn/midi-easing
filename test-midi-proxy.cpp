@@ -81,8 +81,11 @@ struct ControlState {
     bool is_easing = false;
     uint8_t last_sent_value = 0;
     bool modulaser_value_known = false;
-    bool is_latched = true;
+    bool is_latched = false;  // Match the real code's default
     uint8_t last_controller_value = 0;
+    uint8_t recent_send_min = 0;
+    uint8_t recent_send_max = 0;
+    double last_send_time = 0.0;
 };
 
 Config test_config;
@@ -96,6 +99,22 @@ double getCurrentTimeMs() {
 
 void sendMidiCC(uint8_t control, uint8_t value) {
     sent_messages.push_back({control, value});
+
+    // Update send tracking for echo detection
+    ControlState& state = test_state;
+    double now_ms = getCurrentTimeMs();
+
+    // Reset range if this is a new send window (>500ms since last send)
+    if (state.last_send_time == 0 || (now_ms - state.last_send_time) > 500.0) {
+        state.recent_send_min = value;
+        state.recent_send_max = value;
+    } else {
+        // Expand range to include this value
+        if (value < state.recent_send_min) state.recent_send_min = value;
+        if (value > state.recent_send_max) state.recent_send_max = value;
+    }
+
+    state.last_send_time = now_ms;
 }
 
 // ============================================================================
@@ -111,6 +130,40 @@ void resetTestState() {
 // Simulate processing a Modulaser CC message
 void simulateModulaserMessage(uint8_t control, uint8_t value) {
     ControlState& state = test_state;
+
+    // If currently easing, ignore echoes
+    if (state.is_easing) {
+        state.last_modulaser_value = value;
+        state.modulaser_value_known = true;
+        return;
+    }
+
+    // Check if this is an echo of something we recently sent
+    double now_ms = getCurrentTimeMs();
+    double echo_window_ms = 500.0;
+
+    if (state.last_send_time > 0 && (now_ms - state.last_send_time) < echo_window_ms) {
+        // Within echo window - check if value is in our recent send range
+        int margin = test_config.easing_threshold;
+        uint8_t range_min = (state.recent_send_min > margin) ? state.recent_send_min - margin : 0;
+        uint8_t range_max = (state.recent_send_max + margin <= 127) ? state.recent_send_max + margin : 127;
+
+        if (value >= range_min && value <= range_max) {
+            // This is likely an echo - ignore it
+            state.last_modulaser_value = value;
+            state.modulaser_value_known = true;
+            if (!test_config.quiet) {
+                std::cout << "[ECHO] Ignoring (in range " << (int)range_min
+                          << "-" << (int)range_max << ", " << (int)(now_ms - state.last_send_time)
+                          << "ms ago)" << std::endl;
+            }
+            return;
+        }
+    } else if (state.last_send_time > 0) {
+        // Echo window expired - reset the range
+        state.recent_send_min = 0;
+        state.recent_send_max = 0;
+    }
 
     // Check if this new Modulaser value is far from the last controller value
     if (state.modulaser_value_known && state.last_controller_value != 0) {
@@ -424,8 +477,43 @@ TEST(test_rapid_controller_movement_with_lagging_echoes) {
 
     std::cout << "Latched after echo: " << (test_state.is_latched ? "true" : "false") << std::endl;
 
-    // This demonstrates the issue
-    // ASSERT_TRUE(test_state.is_latched);  // This is what we WANT
+    ASSERT_TRUE(test_state.is_latched);
+
+    test_config.quiet = true;
+    tests_passed++;
+}
+
+TEST(test_rapid_small_movements_with_lagging_echoes) {
+    resetTestState();
+    test_config.quiet = false;
+
+    std::cout << "\n=== Simulating CC24 scenario (rapid small movements) ===" << std::endl;
+
+    // Start at 49 (after easing completes)
+    simulateMidiMixMessage(24, 49);
+    simulateModulaserMessage(24, 49);
+    ASSERT_EQ(49, test_state.last_sent_value);
+
+    // Rapid small movements: 50, 51, 52, 53, 54
+    std::cout << "Controller: 50, 51, 52, 53, 54" << std::endl;
+    simulateMidiMixMessage(24, 50);  // Sends immediately (diff=1)
+    simulateMidiMixMessage(24, 51);  // Sends immediately
+    simulateMidiMixMessage(24, 52);  // Sends immediately
+    simulateMidiMixMessage(24, 53);  // Sends immediately
+    simulateMidiMixMessage(24, 54);  // Sends immediately
+    ASSERT_EQ(54, test_state.last_sent_value);
+    ASSERT_EQ(54, test_state.last_controller_value);
+    ASSERT_TRUE(test_state.is_latched);
+
+    // Lagging echoes arrive: 50, 51
+    std::cout << "Modulaser echoes: 50, 51 (lagging)" << std::endl;
+    simulateModulaserMessage(24, 50);  // Should be ignored (diff from last_sent 54 is 4, but close to earlier sends)
+    ASSERT_TRUE(test_state.is_latched);  // Should stay latched!
+
+    simulateModulaserMessage(24, 51);  // Should be ignored
+    ASSERT_TRUE(test_state.is_latched);  // Should stay latched!
+
+    std::cout << "Final latched state: " << (test_state.is_latched ? "true" : "false") << std::endl;
 
     test_config.quiet = true;
     tests_passed++;

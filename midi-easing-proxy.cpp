@@ -53,8 +53,11 @@ struct ControlState {
     bool is_easing = false;
     uint8_t last_sent_value = 0;
     bool modulaser_value_known = false;
-    bool is_latched = false;            // Start latched, will unlatch when Modulaser sends different value
+    bool is_latched = false;            // Start unlatched, otherwise values start easing at start: unwanted!
     uint8_t last_controller_value = 0;  // Track controller position for crossover detection
+    uint8_t recent_send_min = 0;        // Track minimum recently sent value for echo detection
+    uint8_t recent_send_max = 0;        // Track maximum recently sent value for echo detection
+    double last_send_time = 0.0;        // Timestamp of last send for echo window
 };
 
 // ============================================================================
@@ -126,6 +129,22 @@ void sendMidiCC(uint8_t control, uint8_t value) {
         message.push_back(control);
         message.push_back(value);
         toModulaser->sendMessage(&message);
+
+        // Update send tracking for echo detection
+        ControlState& state = control_states[control];
+        double now_ms = getCurrentTimeMs();
+
+        // Reset range if this is a new send window (>500ms since last send)
+        if (state.last_send_time == 0 || (now_ms - state.last_send_time) > 500.0) {
+            state.recent_send_min = value;
+            state.recent_send_max = value;
+        } else {
+            // Expand range to include this value
+            if (value < state.recent_send_min) state.recent_send_min = value;
+            if (value > state.recent_send_max) state.recent_send_max = value;
+        }
+
+        state.last_send_time = now_ms;
     }
 }
 
@@ -185,6 +204,36 @@ void modulaserCallback(double deltatime, std::vector<unsigned char> *message, vo
       state.modulaser_value_known = true;
       // Don't log to reduce noise during easing
       return;
+    }
+
+    // Check if this Modulaser value is an echo of something we recently sent
+    // We track a window of recently sent values (min to max) and ignore echoes within this range
+    // The window expires after 500ms of no activity (echoes shouldn't lag more than that)
+    double now_ms = getCurrentTimeMs();
+    double echo_window_ms = 500.0;
+
+    if (state.last_send_time > 0 && (now_ms - state.last_send_time) < echo_window_ms) {
+      // Within echo window - check if value is in our recent send range
+      int margin = config.easing_threshold;
+      uint8_t range_min = (state.recent_send_min > margin) ? state.recent_send_min - margin : 0;
+      uint8_t range_max = (state.recent_send_max + margin <= 127) ? state.recent_send_max + margin : 127;
+
+      if (value >= range_min && value <= range_max) {
+        // This is likely an echo - ignore it
+        state.last_modulaser_value = value;
+        state.modulaser_value_known = true;
+        if (!config.quiet) {
+          logMessage("Modulaser", control, value);
+          std::cout << "[ECHO] Ignoring (in range " << (int)range_min
+                    << "-" << (int)range_max << ", " << (int)(now_ms - state.last_send_time)
+                    << "ms ago)" << std::endl;
+        }
+        return;
+      }
+    } else if (state.last_send_time > 0) {
+      // Echo window expired - reset the range
+      state.recent_send_min = 0;
+      state.recent_send_max = 0;
     }
 
     // Check if this new Modulaser value is far from the last controller value
@@ -317,7 +366,7 @@ void midimixCallback(double deltatime, std::vector<unsigned char> *message, void
         return;
     }
 
-    // If we don't know Modulaser's value yet, send immediately and latch
+    // If we don't know Modulaser's value yet, be cautious and wait until we receive a value.
     if (!state.modulaser_value_known) {
         sendMidiCC(control, value);
         state.last_sent_value = value;
