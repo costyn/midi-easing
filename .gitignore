@@ -4,6 +4,8 @@ venv/
 # Build artifacts
 *.o
 midi-easing-proxy
+test-midi-proxy
+build/
 
 # Third-party libraries
 vendor/

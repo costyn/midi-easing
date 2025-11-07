@@ -85,33 +85,92 @@ double getCurrentTimeMs() {
     return std::chrono::duration<double, std::milli>(now.time_since_epoch()).count();
 }
 
-void logMessage(const std::string& source, uint8_t control, uint8_t value) {
-    if (!config.quiet) {
-        auto now = std::chrono::system_clock::now();
-        auto time = std::chrono::system_clock::to_time_t(now);
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now.time_since_epoch()) % 1000;
+// Unified logging function with timestamp and action tag
+void log(const std::string &action, int control, const std::string &message) {
+  if (!config.quiet) {
+    auto now = std::chrono::system_clock::now();
+    auto time = std::chrono::system_clock::to_time_t(now);
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
 
-        char buffer[100];
-        std::strftime(buffer, sizeof(buffer), "%H:%M:%S", std::localtime(&time));
+    char buffer[100];
+    std::strftime(buffer, sizeof(buffer), "%H:%M:%S", std::localtime(&time));
 
-        std::cout << "[" << buffer << "." << std::setfill('0') << std::setw(3) << ms.count() << "] "
-                  << source << " -> CC" << (int)control << ": " << (int)value << std::endl;
+    std::cout << "[" << buffer << "." << std::setfill('0') << std::setw(3) << ms.count() << "] "
+              << "[" << action << "]";
+
+    if (control >= 0) {
+      std::cout << " CC" << control;
     }
+
+    if (!message.empty()) {
+      std::cout << " " << message;
+    }
+
+    std::cout << std::endl;
+  }
+}
+
+// Convenience wrapper for basic message logging
+void logMessage(const std::string &source, uint8_t control, uint8_t value) {
+  std::ostringstream msg;
+  msg << source << " -> " << (int)value;
+  log("CONTROL", control, msg.str());
+}
+
+// Convenience wrapper for echo messages
+void logEcho(uint8_t control, uint8_t value, uint8_t range_min, uint8_t range_max, double time_ago_ms) {
+  std::ostringstream msg;
+  msg << "Modulaser -> " << (int)value << " (ignoring echo in range " << (int)range_min << "-" << (int)range_max << ", " << (int)time_ago_ms
+      << "ms ago)";
+  log("ECHO", control, msg.str());
 }
 
 void logEasingStart(uint8_t control, uint8_t from, uint8_t to, uint32_t duration) {
-    if (!config.quiet) {
-        std::cout << "[EASING] Starting for CC" << (int)control
-                  << ": " << (int)from << " -> " << (int)to
-                  << " over " << duration << "ms" << std::endl;
-    }
+  std::ostringstream msg;
+  msg << (int)from << " -> " << (int)to << " over " << duration << "ms";
+  log("EASING", control, msg.str());
 }
 
-void logEasingStop(uint8_t control) {
-    if (!config.quiet) {
-        std::cout << "[EASING] Completed for CC" << (int)control << std::endl;
-    }
+void logEasingStop(uint8_t control) { log("EASING", control, "completed"); }
+
+void logEasingUpdate(uint8_t control, uint8_t value) {
+  std::ostringstream msg;
+  msg << "updated target to " << (int)value;
+  log("EASING", control, msg.str());
+}
+
+void logLatch(uint8_t control, const std::string &reason) { log("LATCH", control, reason); }
+
+void logWaiting(uint8_t control, uint8_t modulaser_val, uint8_t controller_val) {
+  std::ostringstream msg;
+  msg << "waiting for crossover (Modulaser: " << (int)modulaser_val << ", Controller: " << (int)controller_val << ")";
+  log("WAITING", control, msg.str());
+}
+
+void logWhitelist(uint8_t control, uint8_t value) {
+  std::ostringstream msg;
+  msg << "bypassing easing, sending " << (int)value;
+  log("WHITELIST", control, msg.str());
+}
+
+void logUnlatch(uint8_t control, uint8_t modulaser_val, uint8_t controller_val, int diff) {
+  std::ostringstream msg;
+  msg << "Modulaser value " << (int)modulaser_val << " far from controller " << (int)controller_val << " (diff: " << diff << ")";
+  log("UNLATCH", control, msg.str());
+}
+
+void logLED(uint8_t note, bool on, const std::string &reason) {
+  std::ostringstream msg;
+  msg << "Note " << (int)note << " -> " << (on ? "ON" : "OFF") << " (" << reason << ")";
+  log("LED", -1, msg.str());
+}
+
+void logInfo(const std::string &message) { log("INFO", -1, message); }
+
+void logMapping(uint8_t control, uint8_t input_value, uint8_t output_value, const std::string &description) {
+  std::ostringstream msg;
+  msg << "MidiMix -> " << (int)input_value << " -> " << (int)output_value << " (" << description << ")";
+  log("MAPPING", control, msg.str());
 }
 
 uint8_t mapValue(uint8_t value, uint8_t in_min, uint8_t in_max, uint8_t out_min, uint8_t out_max) {
@@ -161,23 +220,16 @@ void modulaserCallback(double deltatime, std::vector<unsigned char> *message, vo
 
     // Handle Note On/Off messages - use for LED control
     if ((status & 0xF0) == 0x80 || (status & 0xF0) == 0x90) {
-        if (!config.quiet) {
-            std::string msg_type = ((status & 0xF0) == 0x90) ? "Note On" : "Note Off";
-            std::cout << "[Modulaser] " << msg_type << " note " << (int)data1
-                      << " velocity " << (int)data2 << std::endl;
-        }
+      // We don't log basic Note On/Off from Modulaser anymore to reduce verbosity
+      // Only log the LED changes which are more relevant
 
-        // Use Modulaser's Note On messages to control MidiMix LEDs
-        // Velocity > 100 = LED on (active preset), velocity <= 100 = LED off (available preset)
-        if (((status & 0xF0) == 0x90) && ledController) {
-            bool shouldBeOn = data2 > 100;
-            ledController->setNoteLED(data1, shouldBeOn);
-
-            if (!config.quiet) {
-                std::cout << "[LED] Note " << (int)data1 << " -> "
-                          << (shouldBeOn ? "ON (active)" : "OFF (available)") << std::endl;
-            }
-        }
+      // Use Modulaser's Note On messages to control MidiMix LEDs
+      // Velocity > 100 = LED on (active preset), velocity <= 100 = LED off (available preset)
+      if (((status & 0xF0) == 0x90) && ledController) {
+        bool shouldBeOn = data2 > 100;
+        ledController->setNoteLED(data1, shouldBeOn);
+        logLED(data1, shouldBeOn, shouldBeOn ? "active" : "available");
+      }
 
         return;
     }
@@ -222,12 +274,7 @@ void modulaserCallback(double deltatime, std::vector<unsigned char> *message, vo
         // This is likely an echo - ignore it
         state.last_modulaser_value = value;
         state.modulaser_value_known = true;
-        if (!config.quiet) {
-          logMessage("Modulaser", control, value);
-          std::cout << "[ECHO] Ignoring (in range " << (int)range_min
-                    << "-" << (int)range_max << ", " << (int)(now_ms - state.last_send_time)
-                    << "ms ago)" << std::endl;
-        }
+        logEcho(control, value, range_min, range_max, now_ms - state.last_send_time);
         return;
       }
     } else if (state.last_send_time > 0) {
@@ -244,21 +291,13 @@ void modulaserCallback(double deltatime, std::vector<unsigned char> *message, vo
             // Modulaser value has changed significantly, unlatch
             if (state.is_latched) {
                 state.is_latched = false;
-                if (!config.quiet) {
-                    std::cout << "[UNLATCH] CC" << (int)control
-                              << " - Modulaser value " << (int)value
-                              << " differs from controller " << (int)state.last_controller_value
-                              << " by " << diff << std::endl;
-                }
+                logUnlatch(control, value, state.last_controller_value, diff);
             }
         } else {
             // Values are close, ensure we're latched
             if (!state.is_latched) {
                 state.is_latched = true;
-                if (!config.quiet) {
-                    std::cout << "[LATCH] CC" << (int)control
-                              << " - Modulaser and controller values are close" << std::endl;
-                }
+                logLatch(control, "Modulaser and controller values are close");
             }
         }
     }
@@ -278,17 +317,12 @@ void midimixCallback(double deltatime, std::vector<unsigned char> *message, void
 
     // Handle Note On/Off messages (0x80-0x9F) - pass through immediately
     if ((status & 0xF0) == 0x80 || (status & 0xF0) == 0x90) {
-        if (!config.quiet) {
-            std::string msg_type = ((status & 0xF0) == 0x90) ? "Note On" : "Note Off";
-            std::cout << "[MidiMix] " << msg_type << " note " << (int)data1
-                      << " velocity " << (int)data2 << std::endl;
-        }
-
-        // Pass through immediately without easing
-        // LED control will be handled by Modulaser's response
-        if (toModulaser) {
-            toModulaser->sendMessage(message);
-        }
+      // We don't log basic Note On/Off from MidiMix to reduce verbosity
+      // Pass through immediately without easing
+      // LED control will be handled by Modulaser's response
+      if (toModulaser) {
+        toModulaser->sendMessage(message);
+      }
         return;
     }
 
@@ -305,14 +339,8 @@ void midimixCallback(double deltatime, std::vector<unsigned char> *message, void
         // Reason: Modulaser's speed goes to 800% at full range, which is never needed
         // This keeps it in a more usable 0-25% range
         uint8_t mapped_value = mapValue(value, 0, 127, 0, 31);
-
-        // Send immediately WITHOUT logging to minimize latency
         sendMidiCC(control, mapped_value);
-
-        if (!config.quiet) {
-            std::cout << "[MidiMix] CC61: " << (int)value
-                      << " -> " << (int)mapped_value << " (mapped 0-31)" << std::endl;
-        }
+        logMapping(control, value, mapped_value, "speed 0-31");
         return;
     }
 
@@ -321,14 +349,8 @@ void midimixCallback(double deltatime, std::vector<unsigned char> *message, void
         // Reason: Physical slider orientation feels backwards
         // Top position (0) = crossfade left, Bottom position (127) = crossfade right
         uint8_t inverted_value = 127 - value;
-
-        // Send immediately - no state tracking, no duplicate checking for maximum responsiveness
         sendMidiCC(control, inverted_value);
-
-        if (!config.quiet) {
-            std::cout << "[MidiMix] CC62: " << (int)value
-                      << " -> " << (int)inverted_value << std::endl;
-        }
+        logMapping(control, value, inverted_value, "inverted");
         return;
     }
 
@@ -336,7 +358,7 @@ void midimixCallback(double deltatime, std::vector<unsigned char> *message, void
 
     // Log the message
     if (!config.quiet) {
-        logMessage("MidiMix", control, value);
+      logMessage("MidiMix", control, value);
     }
 
     ControlState& state = control_states[control];
@@ -355,13 +377,10 @@ void midimixCallback(double deltatime, std::vector<unsigned char> *message, void
     if (config.whitelist_controls.count(control)) {
         // Only send if value actually changed
         if (value != state.last_sent_value) {
-            if (!config.quiet) {
-                std::cout << "[WHITELIST] CC" << (int)control
-                          << " bypassing easing, sending " << (int)value << std::endl;
-            }
-            sendMidiCC(control, value);
-            state.last_modulaser_value = value;
-            state.last_sent_value = value;
+          logWhitelist(control, value);
+          sendMidiCC(control, value);
+          state.last_modulaser_value = value;
+          state.last_sent_value = value;
         }
         return;
     }
@@ -400,20 +419,14 @@ void midimixCallback(double deltatime, std::vector<unsigned char> *message, void
         if (crossed) {
             // Controller has crossed Modulaser value - LATCH and start sending
             state.is_latched = true;
-            if (!config.quiet) {
-                std::cout << "[LATCH] CC" << (int)control
-                          << " - Controller crossed Modulaser value " << (int)modulaser_val
-                          << " (was " << (int)previous_controller_value
-                          << ", now " << (int)value << ")" << std::endl;
-            }
+            std::ostringstream latch_msg;
+            latch_msg << "controller crossed Modulaser value " << (int)modulaser_val << " (was " << (int)previous_controller_value
+                      << ", now " << (int)value << ")";
+            logLatch(control, latch_msg.str());
             // Fall through to normal sending logic below
         } else {
             // Haven't crossed yet - don't send anything
-            if (!config.quiet) {
-                std::cout << "[WAITING] CC" << (int)control
-                          << " - Waiting for crossover (Modulaser: " << (int)modulaser_val
-                          << ", Controller: " << (int)value << ")" << std::endl;
-            }
+            logWaiting(control, modulaser_val, value);
             return;  // Don't send anything
         }
     }
@@ -426,10 +439,7 @@ void midimixCallback(double deltatime, std::vector<unsigned char> *message, void
     if (state.is_easing) {
         // Already easing - just update the target, don't restart
         state.current_target = value;
-        if (!config.quiet) {
-            std::cout << "[EASING] Updated target for CC" << (int)control
-                      << " to " << (int)value << std::endl;
-        }
+        logEasingUpdate(control, value);
     } else {
         // Check threshold
         int diff = std::abs((int)value - (int)state.last_modulaser_value);
@@ -506,27 +516,28 @@ void pollForMidiMix() {
             for (unsigned int i = 0; i < nPorts; i++) {
                 std::string portName = midiin->getPortName(i);
                 if (portName.find(config.input_port_name) != std::string::npos) {
-                    std::cout << "[INFO] Found " << config.input_port_name
-                              << " on port " << i << std::endl;
+                  std::ostringstream msg;
+                  msg << "Found " << config.input_port_name << " on port " << i;
+                  logInfo(msg.str());
 
-                    // Setup MIDI input from MidiMix
-                    fromMidiMix = midiin;
-                    fromMidiMix->openPort(i);
-                    fromMidiMix->setCallback(&midimixCallback, nullptr);
-                    fromMidiMix->ignoreTypes(false, false, false);
+                  // Setup MIDI input from MidiMix
+                  fromMidiMix = midiin;
+                  fromMidiMix->openPort(i);
+                  fromMidiMix->setCallback(&midimixCallback, nullptr);
+                  fromMidiMix->ignoreTypes(false, false, false);
 
-                    // Setup MIDI output to MidiMix for LED control
-                    toMidiMix = midiout;
-                    toMidiMix->openPort(i);
+                  // Setup MIDI output to MidiMix for LED control
+                  toMidiMix = midiout;
+                  toMidiMix->openPort(i);
 
-                    // Initialize LED controller
-                    if (ledController) {
-                        ledController->setMidiOut(toMidiMix);
-                        ledController->runLightShow();
-                    }
+                  // Initialize LED controller
+                  if (ledController) {
+                    ledController->setMidiOut(toMidiMix);
+                    ledController->runLightShow();
+                  }
 
                     midimix_connected = true;
-                    std::cout << "[INFO] Connected to " << config.input_port_name << std::endl;
+                    logInfo("Connected to " + config.input_port_name);
                     return;
                 }
             }
@@ -644,12 +655,12 @@ void printConfig() {
 // ============================================================================
 
 void signalHandler(int signum) {
-    std::cout << "\n[INFO] Shutting down..." << std::endl;
+  logInfo("\nShutting down...");
 
-    // Turn off all LEDs before shutdown
-    if (ledController) {
-        ledController->allOff();
-    }
+  // Turn off all LEDs before shutdown
+  if (ledController) {
+    ledController->allOff();
+  }
 
     running = false;
 }
@@ -682,7 +693,7 @@ int main(int argc, char *argv[]) {
         ledController = new LEDController();
 
         // Create virtual MIDI ports
-        std::cout << "[INFO] Creating virtual MIDI port: " << config.virtual_port_name << std::endl;
+        logInfo("Creating virtual MIDI port: " + config.virtual_port_name);
 
         fromModulaser = new RtMidiIn();
         toModulaser = new RtMidiOut();
@@ -693,17 +704,17 @@ int main(int argc, char *argv[]) {
         fromModulaser->setCallback(&modulaserCallback, nullptr);
         fromModulaser->ignoreTypes(false, false, false);
 
-        std::cout << "[INFO] Virtual port created successfully" << std::endl;
+        logInfo("Virtual port created successfully");
 
         // Start easing thread
         std::thread easingThread(easingThreadFunc);
 
         // Start MidiMix polling thread
-        std::cout << "[INFO] Polling for " << config.input_port_name << "..." << std::endl;
+        logInfo("Polling for " + config.input_port_name + "...");
         std::thread pollingThread(pollForMidiMix);
 
-        std::cout << "\n[READY] MIDI Easing Proxy is running" << std::endl;
-        std::cout << "[READY] Press Ctrl+C to exit\n" << std::endl;
+        logInfo("MIDI Easing Proxy is running");
+        logInfo("Press Ctrl+C to exit\n");
 
         // Wait for threads to complete
         pollingThread.join();
@@ -736,6 +747,6 @@ int main(int argc, char *argv[]) {
         delete toMidiMix;
     }
 
-    std::cout << "[INFO] Shutdown complete" << std::endl;
+    logInfo("Shutdown complete");
     return 0;
 }
