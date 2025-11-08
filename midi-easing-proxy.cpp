@@ -66,6 +66,7 @@ struct ControlState {
   bool modulaser_value_known = false;
   bool is_latched = false;           // Start unlatched
   uint8_t last_controller_value = 0; // Track controller position for crossover detection
+  bool controller_value_known = false; // Track if we've received a value from controller yet
   uint8_t recent_send_min = 0;       // Track minimum recently sent value for echo detection
   uint8_t recent_send_max = 0;       // Track maximum recently sent value for echo detection
   double last_send_time = 0.0;       // Timestamp of last send for echo window
@@ -372,7 +373,9 @@ void modulaserCallback(double deltatime, std::vector<unsigned char> *message, vo
 
     // Check if this new Modulaser value is far from the last controller value
     // If so, unlatch to prevent jumps when controller next moves
-    if (state.modulaser_value_known && state.last_controller_value != 0) {
+    // This applies even on the FIRST Modulaser message (e.g., when Modulaser sends all controls on connect)
+    // Only check if we've received a controller value - otherwise just accept Modulaser's state
+    if (state.controller_value_known) {
         int diff = std::abs((int)value - (int)state.last_controller_value);
         if (diff >= config.easing_threshold) {
             // Modulaser value has changed significantly, unlatch
@@ -450,7 +453,6 @@ void midimixCallback(double deltatime, std::vector<unsigned char> *message, void
 
     ControlState& state = control_states[control];
     uint8_t previous_controller_value = state.last_controller_value;
-    state.last_controller_value = value;  // Always track controller position
 
     // Check whitelist - bypass smoothing and latch logic
     if (config.whitelist_controls.count(control)) {
@@ -460,15 +462,41 @@ void midimixCallback(double deltatime, std::vector<unsigned char> *message, void
           sendMidiCC(control, value);
           state.last_sent_value = value;
         }
+        // Always track controller position (even for whitelisted controls)
+        state.last_controller_value = value;
+        state.controller_value_known = true;
         return;
     }
 
-    // If we don't know Modulaser's value yet, be cautious and wait until we receive a value.
-    if (!state.modulaser_value_known) {
-        sendMidiCC(control, value);
-        state.last_sent_value = value;
-        state.is_latched = false;
-        return;
+    // Handle first controller movement - initialize position without latching
+    if (!state.controller_value_known) {
+        state.last_controller_value = value;
+        state.controller_value_known = true;
+
+        // If we don't know Modulaser's value yet, send immediately and latch
+        if (!state.modulaser_value_known) {
+            sendMidiCC(control, value);
+            state.last_sent_value = value;
+            state.is_latched = true;  // Latch immediately on first move
+            return;
+        }
+
+        // If we DO know Modulaser's value, check if we're close enough to latch
+        int diff = std::abs((int)value - (int)state.last_modulaser_value);
+        if (diff < config.easing_threshold) {
+            // Close enough - latch immediately
+            state.is_latched = true;
+            logLatch(control, "first movement close to Modulaser value");
+            // Fall through to normal sending logic
+        } else {
+            // Not close - wait for crossover
+            state.is_latched = false;
+            logWaiting(control, state.last_modulaser_value, value);
+            return;
+        }
+    } else {
+        // Update controller position for subsequent movements
+        state.last_controller_value = value;
     }
 
     // ============================================================================

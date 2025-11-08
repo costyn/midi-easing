@@ -83,6 +83,7 @@ struct ControlState {
     bool modulaser_value_known = false;
     bool is_latched = false;  // Match the real code's default
     uint8_t last_controller_value = 0;
+    bool controller_value_known = false;  // Track if we've received a controller value
     uint8_t recent_send_min = 0;
     uint8_t recent_send_max = 0;
     double last_send_time = 0.0;
@@ -166,7 +167,8 @@ void simulateModulaserMessage(uint8_t control, uint8_t value) {
     }
 
     // Check if this new Modulaser value is far from the last controller value
-    if (state.modulaser_value_known && state.last_controller_value != 0) {
+    // This applies even on the FIRST Modulaser message (when modulaser_value_known is false)
+    if (state.controller_value_known) {
         int diff = std::abs((int)value - (int)state.last_controller_value);
         if (diff >= test_config.easing_threshold) {
             // Modulaser value has changed significantly, unlatch
@@ -200,14 +202,40 @@ bool simulateMidiMixMessage(uint8_t control, uint8_t value) {
     ControlState& state = test_state;
     uint8_t previous_controller_value = state.last_controller_value;
     state.last_midimix_value = value;
-    state.last_controller_value = value;
 
-    // If we don't know Modulaser's value yet, send immediately and latch
-    if (!state.modulaser_value_known) {
-        sendMidiCC(control, value);
-        state.last_sent_value = value;
-        state.is_latched = true;
-        return true;
+    // Handle first controller movement - initialize position without latching
+    if (!state.controller_value_known) {
+        state.last_controller_value = value;
+        state.controller_value_known = true;
+
+        // If we don't know Modulaser's value yet, send immediately and latch
+        if (!state.modulaser_value_known) {
+            sendMidiCC(control, value);
+            state.last_sent_value = value;
+            state.is_latched = true;  // Latch immediately on first move
+            return true;
+        }
+
+        // If we DO know Modulaser's value, check if we're close enough to latch
+        int diff = std::abs((int)value - (int)state.last_modulaser_value);
+        if (diff < test_config.easing_threshold) {
+            // Close enough - latch immediately
+            state.is_latched = true;
+            if (!test_config.quiet) {
+                std::cout << "[LATCH] First movement close to Modulaser value" << std::endl;
+            }
+            // Fall through to normal sending logic
+        } else {
+            // Not close - wait for crossover
+            state.is_latched = false;
+            if (!test_config.quiet) {
+                std::cout << "[WAITING] First movement not close to Modulaser" << std::endl;
+            }
+            return false;
+        }
+    } else {
+        // Update controller position for subsequent movements
+        state.last_controller_value = value;
     }
 
     // LATCH/PICKUP MODE LOGIC
@@ -268,9 +296,10 @@ bool simulateMidiMixMessage(uint8_t control, uint8_t value) {
 // Unit Tests: Latch/Unlatch Logic
 // ============================================================================
 
-TEST(test_initial_state_is_latched) {
+TEST(test_initial_state_is_unlatched) {
     resetTestState();
-    ASSERT_TRUE(test_state.is_latched);
+    ASSERT_FALSE(test_state.is_latched);
+    ASSERT_FALSE(test_state.controller_value_known);
     tests_passed++;
 }
 
