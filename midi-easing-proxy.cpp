@@ -21,6 +21,7 @@
 #include <atomic>
 #include <cmath>
 #include <csignal>
+#include <unistd.h> // For isatty()
 #include "vendor/rtmidi-6.0.0/RtMidi.h"
 #include "vendor/AHEasing/easing.h"
 #include "led_controller.h"
@@ -97,7 +98,114 @@ std::mutex state_mutex;
 std::atomic<bool> running(true);
 std::atomic<bool> midimix_connected(false);
 
+// Track waiting controls for quiet mode status box
+struct WaitingControl {
+  uint8_t modulaser_val;
+  uint8_t controller_val;
+};
+std::map<uint8_t, WaitingControl> waiting_controls;
+std::mutex waiting_mutex;
+int last_box_lines = 0; // Track number of lines in previous status box
+
+// Track last activity for "Ready" state display
+struct LastActivity {
+  uint8_t control = 0;
+  uint8_t value = 0;
+  bool has_activity = false;
+};
+LastActivity last_activity;
+
 RtMidiIn *fromModulaser = nullptr;
+
+// ============================================================================
+// ANSI Color Codes for Terminal Output
+// ============================================================================
+
+namespace ANSIColor {
+// Check if output is a TTY (supports colors)
+const bool enabled = isatty(STDOUT_FILENO);
+
+// Color codes (only used if TTY detected)
+const char *RESET = enabled ? "\033[0m" : "";
+const char *BOLD = enabled ? "\033[1m" : "";
+const char *DIM = enabled ? "\033[2m" : "";
+
+// Foreground colors
+const char *RED = enabled ? "\033[31m" : "";
+const char *GREEN = enabled ? "\033[32m" : "";
+const char *YELLOW = enabled ? "\033[33m" : "";
+const char *BLUE = enabled ? "\033[34m" : "";
+const char *MAGENTA = enabled ? "\033[35m" : "";
+const char *CYAN = enabled ? "\033[36m" : "";
+const char *WHITE = enabled ? "\033[37m" : "";
+
+// Bright colors
+const char *BRIGHT_RED = enabled ? "\033[91m" : "";
+const char *BRIGHT_GREEN = enabled ? "\033[92m" : "";
+const char *BRIGHT_YELLOW = enabled ? "\033[93m" : "";
+const char *BRIGHT_BLUE = enabled ? "\033[94m" : "";
+const char *BRIGHT_MAGENTA = enabled ? "\033[95m" : "";
+const char *BRIGHT_CYAN = enabled ? "\033[96m" : "";
+} // namespace ANSIColor
+
+// Get color for log action type
+const char *getActionColor(const std::string &action) {
+  if (action == "INFO")
+    return ANSIColor::BRIGHT_BLUE;
+  if (action == "WAITING")
+    return ANSIColor::BRIGHT_YELLOW;
+  if (action == "LATCH")
+    return ANSIColor::BRIGHT_GREEN;
+  if (action == "UNLATCH")
+    return ANSIColor::YELLOW;
+  if (action == "SMOOTH")
+    return ANSIColor::CYAN;
+  if (action == "CONVERGE")
+    return ANSIColor::GREEN;
+  if (action == "CONTROL")
+    return ANSIColor::DIM;
+  if (action == "ECHO")
+    return ANSIColor::MAGENTA;
+  if (action == "WHITELIST")
+    return ANSIColor::BRIGHT_CYAN;
+  if (action == "MAPPING")
+    return ANSIColor::BLUE;
+  if (action == "LED")
+    return ANSIColor::DIM;
+  return ANSIColor::WHITE;
+}
+
+// Get symbol for log action type
+const char *getActionSymbol(const std::string &action) {
+  if (action == "INFO")
+    return "ℹ";
+  if (action == "WAITING")
+    return "⏳";
+  if (action == "LATCH")
+    return "✓";
+  if (action == "UNLATCH")
+    return "⚠";
+  if (action == "SMOOTH")
+    return "〰";
+  if (action == "CONVERGE")
+    return "✓";
+  if (action == "CONTROL")
+    return "→";
+  if (action == "ECHO")
+    return "↩";
+  if (action == "WHITELIST")
+    return "⚡";
+  if (action == "MAPPING")
+    return "⇄";
+  if (action == "LED")
+    return "💡";
+  return "•";
+}
+
+// ============================================================================
+// MIDI I/O Objects
+// ============================================================================
+
 RtMidiOut *toModulaser = nullptr;
 RtMidiIn *fromMidiMix = nullptr;
 RtMidiOut *toMidiMix = nullptr;  // For LED control
@@ -112,6 +220,101 @@ double getCurrentTimeMs() {
     return std::chrono::duration<double, std::milli>(now.time_since_epoch()).count();
 }
 
+// ============================================================================
+// Quiet Mode Status Box
+// ============================================================================
+
+void displayStatusBox() {
+  if (!config.quiet)
+    return;
+
+  std::lock_guard<std::mutex> lock(waiting_mutex);
+
+  // Move cursor up to overwrite previous box
+  if (last_box_lines > 0) {
+    // Move cursor up by number of lines in previous box
+    std::cout << "\033[" << last_box_lines << "A";
+    // Clear from cursor to end of screen
+    std::cout << "\033[J";
+  }
+
+  int current_lines = 0;
+
+  if (waiting_controls.empty()) {
+    // No waiting controls - show ready state with last activity
+    std::cout << ANSIColor::GREEN << "╔════════════════════════════════════════════╗\n";
+
+    if (last_activity.has_activity) {
+      // Show last sent control
+      std::ostringstream ready_line;
+      ready_line << "║ " << ANSIColor::BOLD << "LAST SENT: CC" << std::setw(2) << (int)last_activity.control << ANSIColor::RESET
+                 << ANSIColor::GREEN << " → " << std::setw(3) << (int)last_activity.value;
+
+      std::string line_str = ready_line.str();
+      // Calculate padding: "║ LAST SENT: CC19 → 100" = ~22 visible chars
+      int visible_chars = 22 + (last_activity.control >= 10 ? 1 : 0) + (last_activity.value >= 100 ? 1 : 0);
+      int padding = 45 - visible_chars;
+
+      std::cout << line_str << std::string(padding, ' ') << "║\n";
+    } else {
+      // No activity yet - show generic ready
+      std::cout << "║ " << ANSIColor::BOLD << "STATUS: Ready" << ANSIColor::RESET << ANSIColor::GREEN;
+      std::cout << std::string(45 - 15, ' ') << "║\n";
+    }
+
+    std::cout << "╚════════════════════════════════════════════╝" << ANSIColor::RESET << "\n";
+    current_lines = 3;
+  } else {
+    // Show waiting controls (3 + number of controls lines)
+    std::cout << ANSIColor::YELLOW << "╔════════════════════════════════════════════╗\n";
+    current_lines = 1;
+
+    for (const auto &[control, info] : waiting_controls) {
+      int diff = std::abs((int)info.modulaser_val - (int)info.controller_val);
+
+      std::ostringstream line;
+      line << "║ " << ANSIColor::BOLD << "WAITING: CC" << std::setw(2) << (int)control << ANSIColor::RESET << ANSIColor::YELLOW
+           << " → M:" << std::setw(3) << (int)info.modulaser_val << " | C:" << std::setw(3) << (int)info.controller_val << " | Δ"
+           << std::setw(2) << diff;
+
+      std::string line_str = line.str();
+      // Calculate padding (accounting for ANSI codes which don't display)
+      // Base length: "║ WAITING: CC19 → M:45  | C:82  | Δ37" = ~35 chars visible
+      int visible_chars = 35 + (control >= 10 ? 1 : 0) + (diff >= 10 ? 1 : 0);
+      int padding = 45 - visible_chars;
+
+      std::cout << line_str << std::string(padding, ' ') << "║\n";
+      current_lines++;
+    }
+
+    std::cout << "╚════════════════════════════════════════════╝" << ANSIColor::RESET << "\n";
+    current_lines++;
+  }
+
+  last_box_lines = current_lines;
+  std::cout.flush();
+}
+
+void updateWaitingControl(uint8_t control, uint8_t modulaser_val, uint8_t controller_val) {
+  {
+    std::lock_guard<std::mutex> lock(waiting_mutex);
+    waiting_controls[control] = {modulaser_val, controller_val};
+  }
+  displayStatusBox();
+}
+
+void clearWaitingControl(uint8_t control) {
+  {
+    std::lock_guard<std::mutex> lock(waiting_mutex);
+    waiting_controls.erase(control);
+  }
+  displayStatusBox();
+}
+
+// ============================================================================
+// Logging Functions
+// ============================================================================
+
 // Unified logging function with timestamp and action tag
 void log(const std::string &action, int control, const std::string &message) {
   if (!config.quiet) {
@@ -122,13 +325,21 @@ void log(const std::string &action, int control, const std::string &message) {
     char buffer[100];
     std::strftime(buffer, sizeof(buffer), "%H:%M:%S", std::localtime(&time));
 
-    std::cout << "[" << buffer << "." << std::setfill('0') << std::setw(3) << ms.count() << "] "
-              << "[" << action << "]";
+    // Timestamp in dim gray
+    std::cout << ANSIColor::DIM << "[" << buffer << "." << std::setfill('0') << std::setw(3) << ms.count() << "]" << ANSIColor::RESET
+              << " ";
 
+    // Action tag with color and symbol
+    const char *color = getActionColor(action);
+    const char *symbol = getActionSymbol(action);
+    std::cout << color << symbol << " " << action << ANSIColor::RESET;
+
+    // Control number in bold white
     if (control >= 0) {
-      std::cout << " CC" << control;
+      std::cout << " " << ANSIColor::BOLD << "CC" << control << ANSIColor::RESET;
     }
 
+    // Message
     if (!message.empty()) {
       std::cout << " " << message;
     }
@@ -152,12 +363,18 @@ void logEcho(uint8_t control, uint8_t value, uint8_t range_min, uint8_t range_ma
   log("ECHO", control, msg.str());
 }
 
-void logLatch(uint8_t control, const std::string &reason) { log("LATCH", control, reason); }
+void logLatch(uint8_t control, const std::string &reason) {
+  log("LATCH", control, reason);
+  clearWaitingControl(control); // Remove from waiting status in quiet mode
+}
 
 void logWaiting(uint8_t control, uint8_t modulaser_val, uint8_t controller_val) {
   std::ostringstream msg;
-  msg << "waiting for crossover (Modulaser: " << (int)modulaser_val << ", Controller: " << (int)controller_val << ")";
+  int diff = std::abs((int)modulaser_val - (int)controller_val);
+  msg << "waiting for crossover → " << ANSIColor::BRIGHT_MAGENTA << "Modulaser:" << (int)modulaser_val << ANSIColor::RESET << " | "
+      << ANSIColor::BRIGHT_CYAN << "Controller:" << (int)controller_val << ANSIColor::RESET << " (Δ" << diff << ")";
   log("WAITING", control, msg.str());
+  updateWaitingControl(control, modulaser_val, controller_val); // Update status box in quiet mode
 }
 
 void logWhitelist(uint8_t control, uint8_t value) {
@@ -168,7 +385,8 @@ void logWhitelist(uint8_t control, uint8_t value) {
 
 void logUnlatch(uint8_t control, uint8_t modulaser_val, uint8_t controller_val, int diff) {
   std::ostringstream msg;
-  msg << "Modulaser value " << (int)modulaser_val << " far from controller " << (int)controller_val << " (diff: " << diff << ")";
+  msg << ANSIColor::BRIGHT_MAGENTA << "Modulaser:" << (int)modulaser_val << ANSIColor::RESET << " far from " << ANSIColor::BRIGHT_CYAN
+      << "Controller:" << (int)controller_val << ANSIColor::RESET << " (Δ" << diff << ")";
   log("UNLATCH", control, msg.str());
 }
 
@@ -276,6 +494,14 @@ void sendMidiCC(uint8_t control, uint8_t value) {
         message.push_back(control);
         message.push_back(value);
         toModulaser->sendMessage(&message);
+
+        // Update last activity for status box
+        {
+          std::lock_guard<std::mutex> lock(waiting_mutex);
+          last_activity.control = control;
+          last_activity.value = value;
+          last_activity.has_activity = true;
+        }
 
         // Update send tracking for echo detection
         ControlState& state = control_states[control];
@@ -526,8 +752,8 @@ void midimixCallback(double deltatime, std::vector<unsigned char> *message, void
             // Controller has crossed Modulaser value - LATCH and start sending
             state.is_latched = true;
             std::ostringstream latch_msg;
-            latch_msg << "controller crossed Modulaser value " << (int)modulaser_val << " (was " << (int)previous_controller_value
-                      << ", now " << (int)value << ")";
+            latch_msg << "controller crossed " << ANSIColor::BRIGHT_MAGENTA << "Modulaser:" << (int)modulaser_val << ANSIColor::RESET
+                      << " (was " << (int)previous_controller_value << " → now " << (int)value << ")";
             logLatch(control, latch_msg.str());
             // Fall through to normal sending logic below
         } else {
@@ -875,6 +1101,11 @@ int main(int argc, char *argv[]) {
 
         logInfo("MIDI Easing Proxy is running");
         logInfo("Press Ctrl+C to exit\n");
+
+        // Show initial status box in quiet mode
+        if (config.quiet) {
+          displayStatusBox();
+        }
 
         // Wait for threads to complete
         pollingThread.join();

@@ -76,16 +76,45 @@ The proxy will:
 4. Start the smoothing engine at 100Hz
 5. Display all MIDI messages (verbose mode)
 
-### Quiet Mode
+### Output Modes
 
+**Default Mode** (verbose with color):
+```bash
+./midi-easing-proxy
+```
+
+Displays all MIDI messages with color-coded output:
+- 🎨 **ANSI Colors**: Automatic color detection (disables when piped to files)
+- ⏳ **WAITING**: Yellow - Shows Modulaser vs Controller values during pickup
+- ✓ **LATCH**: Green - Control is synchronized and active
+- 〰 **SMOOTH**: Cyan - EMA smoothing in progress
+- ⚡ **WHITELIST**: Bright cyan - Bypassing smoothing for immediate response
+
+**Quiet Mode**:
 ```bash
 ./midi-easing-proxy -q
 ```
 
-Suppresses detailed MIDI message logging, shows only:
+Displays a clean status box showing only active waiting controls:
+```
+╔════════════════════════════════════════════╗
+║ WAITING: CC19 → M:45  | C:82  | Δ37       ║
+║ WAITING: CC24 → M:100 | C:45  | Δ55       ║
+╚════════════════════════════════════════════╝
+```
+
+When all controls are synchronized, shows last sent control:
+```
+╔════════════════════════════════════════════╗
+║ LAST SENT: CC19 → 95                      ║
+╚════════════════════════════════════════════╝
+```
+
+The box updates in real-time as controls enter/exit waiting state. Perfect for keeping on top of a terminal window during live performance to monitor pickup status at a glance.
+
+Also shows:
 - Startup information
 - Connection status changes
-- Smoothing convergence events
 - Errors
 
 ### Setup Steps
@@ -278,6 +307,33 @@ The proxy includes intelligent pickup detection to prevent jarring jumps when ph
 - **Natural Feel**: Physical control must sweep through the current software value to take effect
 - **Automatic**: No special mode switching or button presses required
 - **Per-Control**: Each control independently tracks its own pickup state
+
+## Example Output
+
+When running in default mode, the proxy displays color-coded, real-time status:
+
+```
+[10:23:45.123] ℹ INFO Creating virtual MIDI port: Midi Easing
+[10:23:45.234] ℹ INFO Polling for MIDI Mix...
+[10:23:46.345] ℹ INFO Connected to MIDI Mix
+[10:23:46.456] ⏳ WAITING CC19 waiting for crossover → Modulaser:45 | Controller:82 (Δ37)
+[10:23:47.001] ⏳ WAITING CC19 waiting for crossover → Modulaser:45 | Controller:68 (Δ23)
+[10:23:47.503] ✓ LATCH CC19 controller crossed Modulaser:45 (was 68 → now 44)
+[10:23:47.512] 〰 SMOOTH CC19 raw=44 -> smoothed=44 (alpha=0.25, vel=2)
+[10:23:47.522] 〰 SMOOTH CC19 raw=41 -> smoothed=43 (alpha=0.30, vel=3)
+[10:23:48.012] ✓ CONVERGE CC19 complete
+```
+
+**Color Legend** (when terminal supports ANSI):
+- Timestamps: Dim gray
+- ⏳ WAITING: Bright yellow - Controller hasn't picked up software value yet
+- ✓ LATCH: Bright green - Controller synchronized with software
+- 〰 SMOOTH: Cyan - EMA filtering in progress
+- ✓ CONVERGE: Green - Smoothing complete, value stabilized
+- ⚡ WHITELIST: Bright cyan - Immediate bypass (no smoothing)
+- Control numbers (CC19): Bold white
+- Modulaser values: Bright magenta
+- Controller values: Bright cyan
 
 ## How It Works
 

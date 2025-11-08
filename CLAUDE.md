@@ -82,6 +82,7 @@ This updates the CMake-generated `compile_commands.json` for MCP tools.
    - Latch/pickup logic
    - Configuration loading
    - Device polling thread
+   - ANSI color-coded logging (auto-detects TTY)
 
 2. **[led_controller.cpp](led_controller.cpp)** / [led_controller.h](led_controller.h): LED feedback system
    - Startup light show sequences
