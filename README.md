@@ -1,6 +1,6 @@
-# MIDI Easing Proxy
+# MIDI Smoothing Proxy
 
-A virtual MIDI proxy that sits between a MIDI controller (Akai MidiMix) and software (Modulaser) to provide smooth easing transitions when control values jump after preset changes.
+A virtual MIDI proxy that sits between a MIDI controller (Akai MidiMix) and software (Modulaser) to provide smooth, responsive control with intelligent filtering to eliminate controller jitter and jarring value jumps.
 
 ## Version 2.0 (C++ Implementation)
 
@@ -10,13 +10,19 @@ This is a high-performance C++ rewrite of the original Python implementation, de
 
 - **Virtual MIDI Port**: Creates "Midi Easing" virtual port that appears as both input and output
 - **Automatic Device Detection**: Polls for MidiMix controller and connects automatically
-- **Smart Easing**: Only applies easing when value differences exceed threshold (default: 3)
+- **LED Control**: Visual feedback using MIDIMix button LEDs with startup light show
+- **EMA Smoothing**: Exponential Moving Average filter with adaptive alpha for continuous, responsive smoothing
+- **Adaptive Response**: Automatically adjusts smoothing intensity based on controller movement speed
+  - Heavy smoothing for slow movements (eliminates stick-slip jitter)
+  - Light smoothing for fast movements (maintains responsiveness)
+- **Convergence**: Smoothed values continue updating until they match the target, even after controller stops moving
+- **Latch/Pickup Mode**: Prevents controller jumps - physical controls must "pick up" current software values before taking effect
 - **Bidirectional Communication**: Tracks echo messages from Modulaser to maintain accurate state
-- **Control Whitelist**: Bypass easing for specific controls that need immediate response
+- **Control Whitelist**: Bypass smoothing for specific controls that need immediate response
 - **Custom Transformations**: Built-in value mapping for specific controls (CC61, CC62)
-- **Per-Control Duration**: Configure easing duration for individual controls
+- **Per-Control Tuning**: Configure smoothing parameters for individual controls
 - **High Performance**: 100Hz update rate with <1% CPU usage
-- **Thread-Safe**: Separate threads for MIDI I/O, polling, and easing calculations
+- **Thread-Safe**: Separate threads for MIDI I/O, polling, and smoothing calculations
 
 ## Requirements
 
@@ -66,8 +72,9 @@ This copies the binary to `/usr/local/bin/midi-easing-proxy`
 The proxy will:
 1. Create a virtual MIDI port named "Midi Easing"
 2. Poll for the MidiMix controller every second
-3. Start the easing engine at 100Hz
-4. Display all MIDI messages (verbose mode)
+3. When connected, run a LED light show on the MidiMix
+4. Start the smoothing engine at 100Hz
+5. Display all MIDI messages (verbose mode)
 
 ### Quiet Mode
 
@@ -78,7 +85,7 @@ The proxy will:
 Suppresses detailed MIDI message logging, shows only:
 - Startup information
 - Connection status changes
-- Easing start/stop events
+- Smoothing convergence events
 - Errors
 
 ### Setup Steps
@@ -105,17 +112,28 @@ input_port_name = MIDI Mix         # Physical controller name to detect
 virtual_port_name = Midi Easing    # Virtual port name to create
 
 [Settings]
-whitelist_controls = 61,62         # Controls that bypass easing (immediate)
-easing_threshold = 3               # Minimum value change to trigger easing
-update_rate_hz = 100               # Easing thread update frequency
+whitelist_controls = 31,51,55,59,61,62  # Controls that bypass smoothing (immediate)
+easing_threshold = 3               # Used for echo detection margin
+update_rate_hz = 100               # Smoothing thread update frequency
 
-[DEFAULTS]
-default_easing_duration = 5000     # Default easing time in milliseconds
+[Smoothing]
+# EMA smoothing parameters
+# Lower alpha = MORE smoothing (more lag, smoother)
+# Higher alpha = LESS smoothing (more responsive, less smooth)
+default_alpha_min = 0.25           # Heavy smoothing for slow movements
+default_alpha_max = 0.8            # Light smoothing for fast movements
+velocity_threshold_low = 2         # Below this: use alpha_min
+velocity_threshold_high = 10       # Above this: use alpha_max
+adaptive_enabled = true            # Use velocity-based adaptive alpha
 
-[Easing_durations]
-18 = 3000                          # Per-control duration overrides
-19 = 1500                          # CC number = duration in milliseconds
-20 = 2500
+[Smoothing_per_control]
+# Per-control smoothing overrides
+# Format: CC = alpha_min,alpha_max,vel_low,vel_high (adaptive)
+# Or:     CC = fixed_alpha (non-adaptive)
+18 = 0.2,0.75,2,12                 # Extra smoothing for CC18
+20 = 0.25,0.75,3,10                # Custom settings for CC20
+61 = 1.0                           # No smoothing (instant)
+62 = 1.0                           # No smoothing (instant)
 ```
 
 ### Configuration Parameters
@@ -125,29 +143,64 @@ default_easing_duration = 5000     # Default easing time in milliseconds
 - **virtual_port_name**: Name for the virtual MIDI port created by the proxy
 
 #### Settings Section
-- **whitelist_controls**: Comma-separated list of control numbers that bypass easing
-  - These controls send immediately without smoothing
+- **whitelist_controls**: Comma-separated list of control numbers that bypass smoothing
+  - These controls send immediately without filtering
   - Useful for buttons or controls that need instant response
-  - Default: `61,62`
+  - Default: `31,51,55,59,61,62`
 
-- **easing_threshold**: Minimum value difference to trigger easing (0-127)
-  - Changes smaller than this are sent immediately
-  - Prevents unnecessary easing on small adjustments
+- **easing_threshold**: Margin used for echo detection (0-127)
+  - Used to determine if Modulaser echo messages are in the expected range
   - Default: `3`
 
-- **update_rate_hz**: How often the easing thread calculates new values
-  - Higher = smoother but more CPU
+- **update_rate_hz**: How often the smoothing thread calculates convergence updates
+  - Higher = smoother convergence but more CPU
   - Default: `100` (every 10ms)
 
-#### DEFAULTS Section
-- **default_easing_duration**: Default time for easing transitions in milliseconds
-  - Used for controls not listed in [Easing_durations]
-  - Default: `5000` (5 seconds)
+#### Smoothing Section
+- **default_alpha_min**: Alpha value for slow controller movements (0.0-1.0)
+  - Lower = heavier smoothing (more lag, eliminates jitter)
+  - Higher = lighter smoothing (more responsive)
+  - Default: `0.25`
 
-#### Easing_durations Section
-- Per-control override of easing duration
-- Format: `control_number = duration_ms`
-- Example: `18 = 3000` means CC18 eases over 3 seconds
+- **default_alpha_max**: Alpha value for fast controller movements (0.0-1.0)
+  - Used when movement velocity exceeds `velocity_threshold_high`
+  - Default: `0.8`
+
+- **velocity_threshold_low**: Movement speed below which `alpha_min` is used (0-127)
+  - Default: `2`
+
+- **velocity_threshold_high**: Movement speed above which `alpha_max` is used (0-127)
+  - Between low and high, alpha is linearly interpolated
+  - Default: `10`
+
+- **adaptive_enabled**: Enable velocity-based adaptive alpha (true/false)
+  - When `true`, alpha adjusts based on movement speed
+  - When `false`, uses `alpha_min` for all movements
+  - Default: `true`
+
+#### Smoothing_per_control Section
+- Per-control override of smoothing parameters
+- **Adaptive format**: `CC = alpha_min,alpha_max,vel_low,vel_high`
+  - Example: `18 = 0.2,0.75,2,12` - CC18 uses custom adaptive smoothing
+- **Fixed format**: `CC = alpha`
+  - Example: `61 = 1.0` - CC61 has no smoothing (instant response)
+
+### Tuning Guide
+
+**If smoothing feels too laggy:**
+- Increase `default_alpha_min` (e.g., 0.3-0.4)
+- Increase `default_alpha_max` (e.g., 0.85-0.95)
+- Lower `velocity_threshold_high` (reach max alpha sooner)
+
+**If controller still feels jerky:**
+- Decrease `default_alpha_min` (e.g., 0.1-0.2)
+- Lower `velocity_threshold_low` (apply heavy smoothing to more movements)
+
+**Recommended starting values for different use cases:**
+
+- **Conservative (maximum smoothness)**: `alpha_min=0.15, alpha_max=0.6`
+- **Balanced (recommended)**: `alpha_min=0.25, alpha_max=0.8`
+- **Responsive (minimum smoothing)**: `alpha_min=0.4, alpha_max=0.95`
 
 ### Built-in Transformations
 
@@ -161,47 +214,140 @@ The proxy includes special handling for two controls that need instant response 
   - Reason: Physical slider orientation feels backwards for crossfader
   - Top position (0) = crossfade left, Bottom position (127) = crossfade right
 
-**Important:** These controls bypass ALL easing logic and are processed immediately before any mutex locking. Modulaser echo messages for these controls are also ignored to prevent callback thread flooding and maintain buttery-smooth responsiveness.
+**Important:** These controls bypass ALL smoothing logic and are processed immediately before any mutex locking. Modulaser echo messages for these controls are also ignored to prevent callback thread flooding and maintain buttery-smooth responsiveness.
+
+## LED Control
+
+The proxy includes intelligent LED feedback using the MIDIMix button LEDs:
+
+### Startup Light Show
+When the MidiMix connects, the proxy runs a light show sequence:
+1. Chase pattern through all LEDs (MUTE row → REC ARM row → BANK buttons)
+2. All LEDs flash on together briefly
+3. Transition to steady state with permanent LEDs on (notes 24, 25, 26)
+
+### Dynamic LED Control
+The proxy responds to MIDI Note On messages from Modulaser to control LEDs:
+- **Note velocity > 100**: LED turns ON (indicates active preset)
+- **Note velocity ≤ 100**: LED turns OFF (indicates available preset)
+
+This provides visual feedback on the physical controller matching the software state.
+
+### LED Notes Mapping
+- **MUTE buttons**: Notes 1, 4, 7, 10, 13, 16, 19, 22
+- **REC ARM buttons**: Notes 3, 6, 9, 12, 15, 18, 21, 24
+- **BANK LEFT**: Note 25
+- **BANK RIGHT**: Note 26
+
+Permanent LEDs (24, 25, 26) remain lit during normal operation to indicate active connection.
+
+### Testing LEDs
+A standalone utility is included to test LED functionality:
+```bash
+make test-leds
+./test-leds
+```
+
+This interactive tool allows you to:
+- Test all known LED buttons
+- Scan all possible note numbers (1-127)
+- Run a demonstration light show
+- Test individual note numbers
+
+## Latch/Pickup Mode
+
+The proxy includes intelligent pickup detection to prevent jarring jumps when physical controls don't match software values (e.g., after a preset change):
+
+### How It Works
+1. **Initial State**: When Modulaser reports a control value (via echo), the proxy tracks both:
+   - Last known software value (from Modulaser echo)
+   - Last known hardware value (from MidiMix)
+
+2. **Pickup Detection**: If hardware and software values diverge (common after preset changes):
+   - The control enters "latched" state
+   - Physical movements are **not** sent to Modulaser yet
+   - Proxy waits for the hardware value to "pick up" the software value
+
+3. **Pickup Threshold**: When the hardware value crosses the software value:
+   - Control becomes "unlatched"
+   - Normal smoothing behavior resumes
+   - Physical movements are filtered and sent smoothly to Modulaser
+
+### Benefits
+- **No Jumps**: Prevents sudden parameter changes when touching controls after preset changes
+- **Natural Feel**: Physical control must sweep through the current software value to take effect
+- **Automatic**: No special mode switching or button presses required
+- **Per-Control**: Each control independently tracks its own pickup state
 
 ## How It Works
 
 ### Architecture
 
 ```
-MidiMix Controller → [Transformations] → [Threshold Check] → [Easing Engine] → Virtual Port → Modulaser
-                                                                                       ↓
-                                                                          Echo Messages (state tracking)
+MidiMix Controller → [Transformations] → [EMA Smoothing] → [Convergence Thread] → Virtual Port → Modulaser
+                                                                                            ↓
+                                                                               Echo Messages (state tracking)
 ```
 
-### Easing Logic
+### EMA Smoothing Logic
 
 1. **MidiMix sends CC message** (e.g., CC18 value 100)
 2. **Apply transformations** (if control is 61 or 62)
 3. **Check whitelist**: If whitelisted → send immediately and done
 4. **Check if Modulaser state known**: If first message → send immediately
-5. **Calculate difference**: `diff = |new_value - last_modulaser_value|`
-6. **Threshold check**:
-   - If `diff < easing_threshold` → send immediately
-   - If `diff >= easing_threshold` → start easing
-7. **Easing thread** (runs at 100Hz):
-   - Calculate elapsed time: `t = elapsed / duration`
-   - Apply easing function: `eased_t = SineEaseInOut(t)`
-   - Interpolate: `value = start + eased_t * (target - start)`
-   - Send eased value to Modulaser
-   - Stop when `t >= 1.0`
+5. **Latch/Pickup Check**: If hardware value doesn't match software value:
+   - Enter latched state (suppress sending)
+   - Wait for hardware to "pick up" software value
+   - Once crossed → unlatch and resume normal operation
+6. **Apply EMA smoothing**:
+   - Calculate velocity: `velocity = |new_value - last_raw_value|`
+   - Determine alpha based on velocity (adaptive mode):
+     - `velocity < velocity_threshold_low` → use `alpha_min` (heavy smoothing)
+     - `velocity > velocity_threshold_high` → use `alpha_max` (light smoothing)
+     - Between thresholds → linear interpolation
+   - Apply EMA: `smoothed = alpha × raw + (1-alpha) × smoothed_prev`
+   - Send smoothed value to Modulaser
+7. **Convergence thread** (runs at 100Hz):
+   - If smoothed value hasn't reached target yet
+   - Continue applying EMA at `alpha_min` for smooth convergence
+   - Send updated values as they change
+   - Stop when `smoothed == target`
+
+### EMA (Exponential Moving Average) Explained
+
+EMA is a low-pass filter that smooths noisy input by maintaining a running average:
+
+**Formula:** `smoothed(t) = α × input(t) + (1-α) × smoothed(t-1)`
+
+**Alpha (α) parameter:**
+- `α = 0.0`: Maximum smoothing (very slow response, infinite lag)
+- `α = 0.5`: Moderate smoothing (balanced)
+- `α = 1.0`: No smoothing (instant response, no filtering)
+
+**Adaptive Alpha:**
+The proxy adjusts α based on how fast you're moving the controller:
+- **Slow movements** (stick-slip jitter): Use low α (heavy smoothing) to eliminate jitter
+- **Fast movements** (intentional changes): Use high α (light smoothing) to stay responsive
+
+**Convergence:**
+After you stop moving the controller, the smoothing thread continues updating at 100Hz until the smoothed value matches the target. This ensures the output always reaches the intended position, even with heavy smoothing.
 
 ### State Management
 
 For each control (0-127), the proxy tracks:
-- Last value from MidiMix
-- Last value from Modulaser (echo)
-- Current easing target
-- Easing start time and duration
-- Whether easing is active
+- Last value from MidiMix (hardware position)
+- Last value from Modulaser (software state via echo)
+- Current smoothed value (floating point for precision)
+- Target value (what we're converging to)
+- Current alpha (for adaptive smoothing)
+- Last raw value (for velocity calculation)
+- Whether actively smoothing to convergence
+- Latch state (whether control needs to pick up software value)
 
-This state is thread-safe (protected by mutex) and allows:
-- Smooth transitions when presets change
-- Immediate response for small adjustments
+This state is thread-safe (protected by mutex) and provides:
+- Continuous smooth filtering of controller input
+- Automatic convergence to final target
+- Velocity-adaptive response
 - No duplicate messages (only sends when value changes)
 
 ## Troubleshooting
@@ -216,14 +362,22 @@ This state is thread-safe (protected by mutex) and allows:
 - Check connection: `ls /dev/cu.*` (should show MIDI device)
 - Proxy polls every second, so wait a moment after connecting
 
-### Easing not working
+### Smoothing not working or feels wrong
 - Verify Modulaser is echoing MIDI messages back to the proxy
-- Check that value differences exceed `easing_threshold` (default 3)
-- Enable verbose logging (remove `-q` flag) to see messages
+- Control may be in latched state - move it to pick up the current software value
+- Adjust alpha values in `[Smoothing]` section for desired response
+- Try different values: lower alpha = more smoothing, higher alpha = less smoothing
+- Enable verbose logging (remove `-q` flag) to see smoothing and convergence messages
+
+### LEDs not working
+- Verify MidiMix is properly connected and detected
+- Check that the proxy opened the MidiMix output port (shown in verbose logs)
+- Try the `test-leds` utility to verify hardware LED functionality
+- Ensure Modulaser is sending Note On messages for preset feedback
 
 ### Performance issues
 - Lower `update_rate_hz` in config.ini (e.g., 50 instead of 100)
-- Increase `default_easing_duration` to reduce transition frequency
+- Increase alpha values to reduce smoothing computation
 - Use quiet mode (`-q`) to reduce console I/O overhead
 
 ## Architecture Details
@@ -232,24 +386,45 @@ This state is thread-safe (protected by mutex) and allows:
 
 - **Main Thread**: MIDI I/O setup, device polling, console output
 - **RtMidi Callback Threads**: Handle incoming MIDI messages (audio thread priority)
-- **Easing Thread**: Runs at configured Hz, calculates and sends eased values
+  - Apply EMA smoothing immediately when MIDI input arrives
+  - Send initial smoothed value to Modulaser
+- **Smoothing Thread**: Runs at configured Hz (default 100Hz)
+  - Continues applying EMA to converge smoothed values toward targets
+  - Only active when controls haven't reached their final position
 - **Polling Thread**: Checks for MidiMix connection every second
 
 All shared state access is protected by a mutex for thread safety.
 
-### Easing Function
+### Smoothing Algorithm
 
-Uses **SineEaseInOut** from the AHEasing library:
-- Smooth acceleration at start
-- Constant velocity in middle
-- Smooth deceleration at end
-- Feels natural for visual parameters
+Uses **Exponential Moving Average (EMA)** with adaptive alpha:
+- Continuous filtering (not target-based)
+- No lag accumulation
+- Velocity-adaptive response
+- Automatic convergence to final value
 
-The function is: `sin((t * π / 2) - π/2) * 0.5 + 0.5`
+**Benefits over traditional easing:**
+- Always responsive (no "catch-up" lag during continuous movement)
+- Smooth slow movements (eliminates stick-slip jitter)
+- Fast movements remain snappy
+- Simpler implementation (no complex time-based curves)
 
-## Legacy Python Implementation
+## Version History
 
-The original Python implementation ([midi-easing.py](midi-easing.py)) is still available in the `attic/` directory for reference. The C++ version provides:
+### v2.0 - EMA Smoothing System
+- **New**: Exponential Moving Average (EMA) smoothing with adaptive alpha
+- **New**: Velocity-based adaptive response (heavy smoothing for slow movements, light for fast)
+- **New**: Automatic convergence - smoothed values continue updating until they reach target
+- **Improved**: Per-control tuning via config.ini
+- **Removed**: Legacy target-based easing system
+
+### v1.x - Target-Based Easing
+- Original implementation with SineEaseInOut easing curves
+- Fixed duration transitions
+- Available in git history for reference
+
+### Legacy Python Implementation
+The original Python implementation is available in the `attic/` directory. The C++ version provides:
 - 10x lower latency
 - <1% CPU usage (vs ~5% for Python)
 - More reliable device detection
@@ -261,7 +436,10 @@ The original Python implementation ([midi-easing.py](midi-easing.py)) is still a
 ```
 .
 ├── midi-easing-proxy.cpp    # Main C++ implementation
-├── Makefile                 # Build system
+├── led_controller.cpp       # LED control implementation
+├── led_controller.h         # LED controller header
+├── test-leds.cpp            # LED testing utility
+├── Makefile                 # Build system (includes test-leds target)
 ├── config.ini               # Configuration file
 ├── setup_deps.sh            # Dependency download script
 ├── README.md                # This file
@@ -275,8 +453,8 @@ The original Python implementation ([midi-easing.py](midi-easing.py)) is still a
 ## Credits
 
 - **RtMidi**: Gary P. Scavone - https://github.com/thestk/rtmidi
-- **AHEasing**: Warren Moore - https://github.com/warrenm/AHEasing
-- **Easing Functions**: Robert Penner's easing equations
+- **EMA/Smoothing Concept**: Standard digital signal processing technique
+- **Original Easing Implementation**: Robert Penner's easing equations (v1.x)
 
 ## License
 
