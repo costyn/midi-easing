@@ -33,11 +33,26 @@ struct Config {
     std::string input_port_name = "MIDI Mix";
     std::string virtual_port_name = "Midi Easing";
     std::set<uint8_t> whitelist_controls;
-    int easing_threshold = 3;
     int update_rate_hz = 100;
-    uint32_t default_easing_duration = 5000;
-    std::map<uint8_t, uint32_t> easing_durations;
+    int easing_threshold = 3; // Used for echo detection margin
     bool quiet = false;
+
+    // EMA Smoothing Configuration
+    float default_alpha_min = 0.25f;      // Heavy smoothing for slow movements
+    float default_alpha_max = 0.8f;       // Light smoothing for fast movements
+    uint8_t velocity_threshold_low = 2;   // Below this: use alpha_min
+    uint8_t velocity_threshold_high = 10; // Above this: use alpha_max
+    bool adaptive_enabled = true;         // Use velocity-based adaptive alpha
+
+    // Per-control EMA settings: control -> (alpha_min, alpha_max, vel_low, vel_high, adaptive)
+    struct SmoothingParams {
+      float alpha_min;
+      float alpha_max;
+      uint8_t velocity_threshold_low;
+      uint8_t velocity_threshold_high;
+      bool adaptive_enabled;
+    };
+    std::map<uint8_t, SmoothingParams> smoothing_per_control;
 };
 
 // ============================================================================
@@ -45,19 +60,31 @@ struct Config {
 // ============================================================================
 
 struct ControlState {
-    uint8_t last_midimix_value = 0;
-    uint8_t last_modulaser_value = 0;
-    uint8_t current_target = 0;
-    double easing_start_time = 0.0;
-    uint32_t easing_duration = 5000;
-    bool is_easing = false;
-    uint8_t last_sent_value = 0;
-    bool modulaser_value_known = false;
-    bool is_latched = false;            // Start unlatched, otherwise values start easing at start: unwanted!
-    uint8_t last_controller_value = 0;  // Track controller position for crossover detection
-    uint8_t recent_send_min = 0;        // Track minimum recently sent value for echo detection
-    uint8_t recent_send_max = 0;        // Track maximum recently sent value for echo detection
-    double last_send_time = 0.0;        // Timestamp of last send for echo window
+  // Common state
+  uint8_t last_sent_value = 0;
+  uint8_t last_modulaser_value = 0; // Track value from Modulaser echo (for latch logic)
+  bool modulaser_value_known = false;
+  bool is_latched = false;           // Start unlatched
+  uint8_t last_controller_value = 0; // Track controller position for crossover detection
+  bool controller_value_known = false; // Track if we've received a value from controller yet
+  uint8_t recent_send_min = 0;       // Track minimum recently sent value for echo detection
+  uint8_t recent_send_max = 0;       // Track maximum recently sent value for echo detection
+  double last_send_time = 0.0;       // Timestamp of last send for echo window
+
+  // EMA smoothing state
+  float smoothed_value = 0.0f;   // Current smoothed output value
+  uint8_t last_raw_value = 0;    // Last raw input value (for velocity calc)
+  uint8_t target_value = 0;      // Target value to converge to
+  double last_update_time = 0.0; // For time-based velocity calculation
+  float current_alpha = 0.5f;    // Current alpha value (adaptive or fixed)
+  bool is_smoothing = false;     // True if smoothed_value hasn't converged to target yet
+
+  // EMA configuration (per-control, initialized from Config)
+  float alpha_min = 0.25f;              // Alpha for slow movements
+  float alpha_max = 0.8f;               // Alpha for fast movements
+  uint8_t velocity_threshold_low = 2;   // Below this: use alpha_min
+  uint8_t velocity_threshold_high = 10; // Above this: use alpha_max
+  bool adaptive_enabled = true;         // Use adaptive alpha
 };
 
 // ============================================================================
@@ -125,20 +152,6 @@ void logEcho(uint8_t control, uint8_t value, uint8_t range_min, uint8_t range_ma
   log("ECHO", control, msg.str());
 }
 
-void logEasingStart(uint8_t control, uint8_t from, uint8_t to, uint32_t duration) {
-  std::ostringstream msg;
-  msg << (int)from << " -> " << (int)to << " over " << duration << "ms";
-  log("EASING", control, msg.str());
-}
-
-void logEasingStop(uint8_t control) { log("EASING", control, "completed"); }
-
-void logEasingUpdate(uint8_t control, uint8_t value) {
-  std::ostringstream msg;
-  msg << "updated target to " << (int)value;
-  log("EASING", control, msg.str());
-}
-
 void logLatch(uint8_t control, const std::string &reason) { log("LATCH", control, reason); }
 
 void logWaiting(uint8_t control, uint8_t modulaser_val, uint8_t controller_val) {
@@ -175,6 +188,81 @@ void logMapping(uint8_t control, uint8_t input_value, uint8_t output_value, cons
 
 uint8_t mapValue(uint8_t value, uint8_t in_min, uint8_t in_max, uint8_t out_min, uint8_t out_max) {
     return out_min + (value - in_min) * (out_max - out_min) / (in_max - in_min);
+}
+
+// ============================================================================
+// EMA Smoothing Functions (New System)
+// ============================================================================
+
+// Logging for EMA smoothing (optional debug info)
+void logSmoothing(uint8_t control, uint8_t raw, uint8_t smoothed, float alpha, int velocity) {
+  std::ostringstream msg;
+  msg << "raw=" << (int)raw << " -> smoothed=" << (int)smoothed << " (alpha=" << std::fixed << std::setprecision(2) << alpha
+      << ", vel=" << velocity << ")";
+  log("SMOOTH", control, msg.str());
+}
+
+// Apply EMA smoothing with adaptive alpha based on velocity
+uint8_t applyEMASmoothing(ControlState &state, uint8_t raw_value, uint8_t control, const Config &config) {
+  // Calculate velocity (rate of change)
+  int velocity = std::abs((int)raw_value - (int)state.last_raw_value);
+
+  // Determine alpha (adaptive or fixed)
+  float alpha = state.current_alpha; // Default/fixed
+  if (state.adaptive_enabled) {
+    if (velocity < state.velocity_threshold_low) {
+      // Slow movement: Heavy smoothing
+      alpha = state.alpha_min;
+    } else if (velocity > state.velocity_threshold_high) {
+      // Fast movement: Light smoothing (more responsive)
+      alpha = state.alpha_max;
+    } else {
+      // Medium movement: Linear interpolation
+      float t = (float)(velocity - state.velocity_threshold_low) / (state.velocity_threshold_high - state.velocity_threshold_low);
+      alpha = state.alpha_min + t * (state.alpha_max - state.alpha_min);
+    }
+  }
+
+  // Initialize smoothed_value on first use
+  if (state.smoothed_value == 0.0f && state.last_raw_value == 0) {
+    state.smoothed_value = raw_value;
+  }
+
+  // Set target value (what we want to converge to)
+  state.target_value = raw_value;
+
+  // Apply EMA: smoothed = α × raw + (1-α) × smoothed_prev
+  state.smoothed_value = alpha * raw_value + (1.0f - alpha) * state.smoothed_value;
+  state.current_alpha = alpha; // Store for debugging
+  state.last_raw_value = raw_value;
+  state.last_update_time = getCurrentTimeMs();
+
+  // Round to nearest integer
+  uint8_t result = (uint8_t)(state.smoothed_value + 0.5f);
+
+  // Check if we need to continue smoothing (smoothed hasn't reached target yet)
+  if (result != state.target_value) {
+    if (!state.is_smoothing) {
+      // Starting new smoothing
+      state.is_smoothing = true;
+      if (!config.quiet) {
+        std::ostringstream msg;
+        msg << "START convergence to " << (int)state.target_value;
+        log("SMOOTH", control, msg.str());
+      }
+    } else {
+      state.is_smoothing = true; // Keep smoothing
+    }
+  } else {
+    state.is_smoothing = false;
+  }
+
+  // Debug logging - shows raw input, smoothed output, alpha, and velocity
+  if (!config.quiet) {
+    logSmoothing(control, raw_value, result, alpha, velocity);
+  }
+
+  return result;
 }
 
 // ============================================================================
@@ -251,10 +339,10 @@ void modulaserCallback(double deltatime, std::vector<unsigned char> *message, vo
     // Retrieve current control state
     ControlState& state = control_states[control];
 
-    if (state.is_easing) {
+    if (state.is_smoothing) {
       state.last_modulaser_value = value;
       state.modulaser_value_known = true;
-      // Don't log to reduce noise during easing
+      // Don't log to reduce noise during smoothing
       return;
     }
 
@@ -274,7 +362,7 @@ void modulaserCallback(double deltatime, std::vector<unsigned char> *message, vo
         // This is likely an echo - ignore it
         state.last_modulaser_value = value;
         state.modulaser_value_known = true;
-        logEcho(control, value, range_min, range_max, now_ms - state.last_send_time);
+        // logEcho(control, value, range_min, range_max, now_ms - state.last_send_time);
         return;
       }
     } else if (state.last_send_time > 0) {
@@ -285,7 +373,9 @@ void modulaserCallback(double deltatime, std::vector<unsigned char> *message, vo
 
     // Check if this new Modulaser value is far from the last controller value
     // If so, unlatch to prevent jumps when controller next moves
-    if (state.modulaser_value_known && state.last_controller_value != 0) {
+    // This applies even on the FIRST Modulaser message (e.g., when Modulaser sends all controls on connect)
+    // Only check if we've received a controller value - otherwise just accept Modulaser's state
+    if (state.controller_value_known) {
         int diff = std::abs((int)value - (int)state.last_controller_value);
         if (diff >= config.easing_threshold) {
             // Modulaser value has changed significantly, unlatch
@@ -363,34 +453,50 @@ void midimixCallback(double deltatime, std::vector<unsigned char> *message, void
 
     ControlState& state = control_states[control];
     uint8_t previous_controller_value = state.last_controller_value;
-    state.last_midimix_value = value;
-    state.last_controller_value = value;  // Always track controller position
 
-    // Get easing duration for this control
-    if (config.easing_durations.count(control)) {
-        state.easing_duration = config.easing_durations[control];
-    } else {
-        state.easing_duration = config.default_easing_duration;
-    }
-
-    // Check whitelist - bypass easing and latch logic
+    // Check whitelist - bypass smoothing and latch logic
     if (config.whitelist_controls.count(control)) {
         // Only send if value actually changed
         if (value != state.last_sent_value) {
           logWhitelist(control, value);
           sendMidiCC(control, value);
-          state.last_modulaser_value = value;
           state.last_sent_value = value;
         }
+        // Always track controller position (even for whitelisted controls)
+        state.last_controller_value = value;
+        state.controller_value_known = true;
         return;
     }
 
-    // If we don't know Modulaser's value yet, be cautious and wait until we receive a value.
-    if (!state.modulaser_value_known) {
-        sendMidiCC(control, value);
-        state.last_sent_value = value;
-        state.is_latched = false;
-        return;
+    // Handle first controller movement - initialize position without latching
+    if (!state.controller_value_known) {
+        state.last_controller_value = value;
+        state.controller_value_known = true;
+
+        // If we don't know Modulaser's value yet, send immediately and latch
+        if (!state.modulaser_value_known) {
+            sendMidiCC(control, value);
+            state.last_sent_value = value;
+            state.is_latched = true;  // Latch immediately on first move
+            return;
+        }
+
+        // If we DO know Modulaser's value, check if we're close enough to latch
+        int diff = std::abs((int)value - (int)state.last_modulaser_value);
+        if (diff < config.easing_threshold) {
+            // Close enough - latch immediately
+            state.is_latched = true;
+            logLatch(control, "first movement close to Modulaser value");
+            // Fall through to normal sending logic
+        } else {
+            // Not close - wait for crossover
+            state.is_latched = false;
+            logWaiting(control, state.last_modulaser_value, value);
+            return;
+        }
+    } else {
+        // Update controller position for subsequent movements
+        state.last_controller_value = value;
     }
 
     // ============================================================================
@@ -432,74 +538,64 @@ void midimixCallback(double deltatime, std::vector<unsigned char> *message, void
     }
 
     // ============================================================================
-    // NORMAL EASING LOGIC (when latched)
+    // EMA SMOOTHING (when latched)
     // ============================================================================
 
-    // Check if already easing
-    if (state.is_easing) {
-        // Already easing - just update the target, don't restart
-        state.current_target = value;
-        logEasingUpdate(control, value);
-    } else {
-        // Check threshold
-        int diff = std::abs((int)value - (int)state.last_modulaser_value);
-        if (diff < config.easing_threshold) {
-            // Below threshold, send immediately
-            sendMidiCC(control, value);
-            state.last_modulaser_value = value;
-            state.last_sent_value = value;
-        } else {
-            // Start NEW easing
-            state.current_target = value;
-            state.easing_start_time = getCurrentTimeMs();
-            state.is_easing = true;
-            logEasingStart(control, state.last_modulaser_value, value, state.easing_duration);
-        }
+    uint8_t smoothed = applyEMASmoothing(state, value, control, config);
+
+    // Only send if value changed (avoid duplicates)
+    if (smoothed != state.last_sent_value) {
+      sendMidiCC(control, smoothed);
+      state.last_sent_value = smoothed;
     }
 }
 
 // ============================================================================
-// Easing Thread
+// Smoothing Thread (handles EMA convergence)
 // ============================================================================
 
 void easingThreadFunc() {
-    while (running) {
-        double now_ms = getCurrentTimeMs();
+  while (running) {
+    std::lock_guard<std::mutex> lock(state_mutex);
 
-        std::lock_guard<std::mutex> lock(state_mutex);
+    for (auto &[control, state] : control_states) {
+      // Continue applying EMA to converge smoothed_value toward target_value
+      if (state.is_smoothing) {
+        float alpha = state.alpha_min; // Use minimum alpha for convergence (smoothest)
 
-        for (auto& [control, state] : control_states) {
-            if (state.is_easing) {
-                double elapsed = now_ms - state.easing_start_time;
-                double t = std::min(1.0, elapsed / state.easing_duration);
+        // Apply EMA: smoothed = α × target + (1-α) × smoothed_prev
+        state.smoothed_value = alpha * state.target_value + (1.0f - alpha) * state.smoothed_value;
 
-                // Use SineEaseInOut easing function from AHEasing
-                double eased_t = SineEaseInOut(t);
+        // Round to nearest integer
+        uint8_t result = (uint8_t)(state.smoothed_value + 0.5f);
 
-                // Calculate eased value
-                double from = state.last_modulaser_value;
-                double to = state.current_target;
-                uint8_t eased_value = from + eased_t * (to - from);
+        // Debug: Log convergence progress
+        // if (!config.quiet) {
+        //     std::ostringstream msg;
+        //     msg << "converging: target=" << (int)state.target_value
+        //         << " smoothed=" << (int)result
+        //         << " (alpha=" << std::fixed << std::setprecision(2) << alpha << ")";
+        //     log("CONVERGE", control, msg.str());
+        // }
 
-                // Only send if value changed (avoid duplicates)
-                if (eased_value != state.last_sent_value) {
-                    sendMidiCC(control, eased_value);
-                    state.last_sent_value = eased_value;
-                }
-
-                // Check if easing complete
-                if (t >= 1.0) {
-                    state.is_easing = false;
-                    state.last_modulaser_value = state.current_target;
-                    logEasingStop(control);
-                }
-            }
+        // Only send if value changed (avoid duplicates)
+        if (result != state.last_sent_value) {
+          sendMidiCC(control, result);
+          state.last_sent_value = result;
         }
 
-        std::this_thread::sleep_for(
-            std::chrono::milliseconds(1000 / config.update_rate_hz)
-        );
+        // Check if converged (smoothed has reached target)
+        if (result == state.target_value) {
+          state.is_smoothing = false;
+          if (!config.quiet) {
+            log("CONVERGE", control, "complete");
+          }
+        }
+      }
     }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000 / config.update_rate_hz));
+  }
 }
 
 // ============================================================================
@@ -609,29 +705,98 @@ bool parseConfig(const std::string& filename) {
             }
             else if (key == "easing_threshold") config.easing_threshold = std::stoi(value);
             else if (key == "update_rate_hz") config.update_rate_hz = std::stoi(value);
+        } else if (current_section == "Smoothing") {
+          if (key == "default_alpha_min")
+            config.default_alpha_min = std::stof(value);
+          else if (key == "default_alpha_max")
+            config.default_alpha_max = std::stof(value);
+          else if (key == "velocity_threshold_low")
+            config.velocity_threshold_low = std::stoi(value);
+          else if (key == "velocity_threshold_high")
+            config.velocity_threshold_high = std::stoi(value);
+          else if (key == "adaptive_enabled")
+            config.adaptive_enabled = (value == "true" || value == "1");
+        } else if (current_section == "Smoothing_per_control") {
+          uint8_t control = std::stoi(key);
+
+          // Parse value - can be either:
+          // 1. Single float (fixed alpha): "0.5"
+          // 2. Comma-separated (alpha_min, alpha_max, vel_low, vel_high): "0.2,0.8,2,10"
+          std::stringstream ss(value);
+          std::string item;
+          std::vector<std::string> values;
+          while (std::getline(ss, item, ',')) {
+            trim(item);
+            values.push_back(item);
+          }
+
+          Config::SmoothingParams params;
+          if (values.size() == 1) {
+            // Fixed alpha mode
+            float alpha = std::stof(values[0]);
+            params.alpha_min = alpha;
+            params.alpha_max = alpha;
+            params.velocity_threshold_low = 0;
+            params.velocity_threshold_high = 127;
+            params.adaptive_enabled = false;
+          } else if (values.size() == 4) {
+            // Full adaptive mode
+            params.alpha_min = std::stof(values[0]);
+            params.alpha_max = std::stof(values[1]);
+            params.velocity_threshold_low = std::stoi(values[2]);
+            params.velocity_threshold_high = std::stoi(values[3]);
+            params.adaptive_enabled = true;
+          } else {
+            std::cerr << "[WARNING] Invalid smoothing config for CC" << (int)control << std::endl;
+            continue;
+          }
+
+          config.smoothing_per_control[control] = params;
         }
-        else if (current_section == "DEFAULTS") {
-            if (key == "default_easing_duration") {
-                config.default_easing_duration = std::stoi(value);
-            }
-        }
-        else if (current_section == "Easing_durations") {
-            uint8_t control = std::stoi(key);
-            uint32_t duration = std::stoi(value);
-            config.easing_durations[control] = duration;
-        }
+        // Ignore legacy [DEFAULTS] and [Easing_durations] sections
     }
 
     return true;
+}
+
+// Initialize control states with smoothing parameters from config
+void initializeControlStates() {
+  std::lock_guard<std::mutex> lock(state_mutex);
+
+  // Initialize all 128 possible MIDI CC controls
+  for (int i = 0; i < 128; i++) {
+    uint8_t control = i;
+    ControlState &state = control_states[control];
+
+    // Check if there's a per-control override
+    if (config.smoothing_per_control.count(control)) {
+      const auto &params = config.smoothing_per_control[control];
+      state.alpha_min = params.alpha_min;
+      state.alpha_max = params.alpha_max;
+      state.velocity_threshold_low = params.velocity_threshold_low;
+      state.velocity_threshold_high = params.velocity_threshold_high;
+      state.adaptive_enabled = params.adaptive_enabled;
+      state.current_alpha = params.alpha_min; // Start with min alpha
+    } else {
+      // Use global defaults
+      state.alpha_min = config.default_alpha_min;
+      state.alpha_max = config.default_alpha_max;
+      state.velocity_threshold_low = config.velocity_threshold_low;
+      state.velocity_threshold_high = config.velocity_threshold_high;
+      state.adaptive_enabled = config.adaptive_enabled;
+      state.current_alpha = config.default_alpha_min; // Start with min alpha
+    }
+  }
 }
 
 void printConfig() {
     std::cout << "\n=== Configuration ===" << std::endl;
     std::cout << "Input Port: " << config.input_port_name << std::endl;
     std::cout << "Virtual Port: " << config.virtual_port_name << std::endl;
-    std::cout << "Easing Threshold: " << config.easing_threshold << std::endl;
     std::cout << "Update Rate: " << config.update_rate_hz << " Hz" << std::endl;
-    std::cout << "Default Duration: " << config.default_easing_duration << " ms" << std::endl;
+    std::cout << "EMA Alpha Range: " << config.default_alpha_min << " - " << config.default_alpha_max << std::endl;
+    std::cout << "Velocity Thresholds: " << (int)config.velocity_threshold_low << " - " << (int)config.velocity_threshold_high << std::endl;
+    std::cout << "Adaptive Enabled: " << (config.adaptive_enabled ? "yes" : "no") << std::endl;
 
     if (!config.whitelist_controls.empty()) {
         std::cout << "Whitelisted Controls: ";
@@ -641,12 +806,6 @@ void printConfig() {
         std::cout << std::endl;
     }
 
-    if (!config.easing_durations.empty()) {
-        std::cout << "Custom Durations:" << std::endl;
-        for (const auto& [control, duration] : config.easing_durations) {
-            std::cout << "  CC" << (int)control << ": " << duration << " ms" << std::endl;
-        }
-    }
     std::cout << "=====================\n" << std::endl;
 }
 
@@ -683,6 +842,7 @@ int main(int argc, char *argv[]) {
 
     // Parse configuration
     parseConfig("config.ini");
+    initializeControlStates(); // Initialize control states with smoothing params
     printConfig();
 
     // Setup signal handler
